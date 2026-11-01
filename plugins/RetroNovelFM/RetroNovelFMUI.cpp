@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <string>
 
 START_NAMESPACE_DISTRHO
 
@@ -28,11 +29,14 @@ struct Box {
     bool hit(float px, float py) const { return px >= x && px < x + w && py >= y && py < y + h; }
 };
 
-enum CtlType { ctSelect, ctKnob, ctToggle, ctAction };
+enum CtlType { ctSelect, ctKnob, ctToggle, ctAction, ctEraTab, ctLoad, ctClearSmp, ctRootDn, ctRootUp,
+               ctEditOpen, ctEditClose, ctEditUser, ctEditLen, ctEditClear, ctEditCopy, ctCell };
+// control groups: 0 = always, 1..3 = only on that era tab (FM / XP / user), 10 = drum editor overlay
+enum CtlGroup { gAlways = 0, gFM = 1, gXP = 2, gUser = 3, gEditor = 10 };
 enum ActionId { aPrev, aNext, aRandom };
 
 struct Control {
-    CtlType type; int param; float value; Box b; const char* label;
+    CtlType type; int param; float value; Box b; const char* label; int group;
 };
 
 class RetroNovelFMUI : public UI
@@ -49,8 +53,13 @@ public:
         setGeometryConstraints((uint)(kW * 0.6 * sf), (uint)(kH * 0.6 * sf), true, false);
         if (sf != 1.0) setSize((uint)(kW * sf), (uint)(kH * sf));
 
+        static const int seed[4] = { 0, 5, 7, 11 };
+        for (int u = 0; u < 4; ++u) { copyPreset(u, seed[u]); fRoot[u] = 60; }
         buildLayout();
        #ifdef RETRO_SCREENSHOT
+        if (std::getenv("RETRO_EDITOR")) { fEditor = true; fEditUser = 0; }
+        if (const char* e = std::getenv("RETRO_TAB")) fEraTab = std::atoi(e);
+        if (std::getenv("RETRO_SMP")) { fSmpPath[0] = "C:\\Music\\vn_piano_C4.wav"; fSmpPath[2] = "/home/me/rpgxp/Audio/SE/bell.ogg"; fRoot[2] = 72; }
         if (const char* e = std::getenv("RETRO_INST")) { const float v = (float)std::atoi(e); parameterChanged(pInstrument, v); setParameterValue(pInstrument, v); fSwitchT = -10; fTypeT = -10; }
         if (const char* e = std::getenv("RETRO_ACT")) fParams[pOutActivity] = (float)std::atof(e);
         if (std::getenv("RETRO_DRUMS")) { fParams[pDrumMode] = 1; fParams[pDrumPattern] = 4; fParams[pOutDrumStep] = 6; }
@@ -68,9 +77,9 @@ protected:
        #endif
         if (index == pInstrument)
         {
-            const int ni = clampi((int)std::lround(value), 0, 23);
-            const int oi = clampi((int)std::lround(fParams[pInstrument]), 0, 23);
-            if (ni != oi || !fInited) { fPrevChar = kFlavor[oi].ch; fSwitchT = now(); fTypeT = now(); }
+            const int ni = clampi((int)std::lround(value), 0, kNumInstruments - 1);
+            const int oi = clampi((int)std::lround(fParams[pInstrument]), 0, kNumInstruments - 1);
+            if (ni != oi || !fInited) { fPrevChar = kFlavor[oi].ch; fSwitchT = now(); fTypeT = now(); fEraTab = eraOf(ni); }
             fInited = true;
         }
         fParams[index] = value;
@@ -78,6 +87,18 @@ protected:
     }
 
     void uiIdle() override { repaint(); }
+
+    // DSP state -> UI (user samples, roots, user drum patterns)
+    void stateChanged(const char* key, const char* value) override
+    {
+        if (!key || !value || std::strlen(key) < 4) return;
+        const int k = key[std::strlen(key) - 1] - '1';
+        if (k < 0 || k > 3) return;
+        if (!std::strncmp(key, "smp", 3)) fSmpPath[k] = value;
+        else if (!std::strncmp(key, "root", 4)) fRoot[k] = clampi(std::atoi(value), 0, 127);
+        else if (!std::strncmp(key, "pat", 3)) parsePattern(k, value);
+        repaint();
+    }
 
     // ------------------------------------------------------------------ drawing
     void onNanoDisplay() override
@@ -87,7 +108,7 @@ protected:
         save();
         scale(sc, sc);
 
-        const int inst = clampi((int)std::lround(fParams[pInstrument]), 0, 23);
+        const int inst = clampi((int)std::lround(fParams[pInstrument]), 0, kNumInstruments - 1);
         const int ch = kFlavor[inst].ch;
         const CharacterDef& C = kChars[ch];
         const float sw = std::fmin(1.f, (fT - fSwitchT) / 0.45f);
@@ -113,6 +134,7 @@ protected:
         drawSoundPanel(C);
         drawTextbox(C, inst);
         drawDrumPanel(C);
+        if (fEditor) drawEditor(C);
 
         restore();
     }
@@ -131,26 +153,72 @@ protected:
         for (int i = 0; i < fCtlCount; ++i)
         {
             Control& c = fCtl[i];
-            if (!c.b.hit(px, py)) continue;
+            if (!visible(c) || !c.b.hit(px, py)) continue;
+            const int cur = clampi((int)std::lround(fParams[pInstrument]), 0, kNumInstruments - 1);
             switch (c.type)
             {
-            case ctSelect: setParam(c.param, c.value); break;
+            case ctSelect:
+                if (c.param == pDrumPattern && c.value < kNumPresetPatterns) fLastPreset = (int)c.value;
+                setParam(c.param, c.value);
+                break;
             case ctToggle: setParam(c.param, fParams[c.param] > 0.5f ? 0.f : 1.f); break;
             case ctAction:
             {
-                const int cur = clampi((int)std::lround(fParams[pInstrument]), 0, 23);
-                int n = cur;
-                if (c.value == aPrev) n = (cur + 23) % 24;
-                else if (c.value == aNext) n = (cur + 1) % 24;
-                else { n = (int)(hash01((int)(fT * 1000)) * 24) % 24; if (n == cur) n = (n + 7) % 24; }
-                setParam(pInstrument, (float)n);
+                const int lo = fEraTab == eraPC98 ? 0 : (fEraTab == eraXP ? kFirstXP : kFirstUser);
+                const int cnt = fEraTab == eraPC98 ? kNumFM : (fEraTab == eraXP ? kNumXP : kNumUser);
+                int idx = (cur >= lo && cur < lo + cnt) ? cur - lo : 0;
+                if (c.value == aPrev) idx = (idx + cnt - 1) % cnt;
+                else if (c.value == aNext) idx = (idx + 1) % cnt;
+                else { const int r = (int)(hash01((int)(fT * 1000)) * cnt) % cnt; idx = r == idx ? (r + 1) % cnt : r; }
+                setParam(pInstrument, (float)(lo + idx));
                 break;
             }
             case ctKnob:
-                if (ev.button == 3) { setParam(c.param, kParams[c.param].def); break; }
+                if (ev.button == kMouseButtonRight) { setParam(c.param, kParams[c.param].def); break; }
                 fDrag = i; fDragY = py; fDragV = norm(c.param);
                 editParameter(c.param, true);
                 break;
+            case ctEraTab: fEraTab = (int)c.value; break;
+            case ctLoad:
+            {
+                char key[8]; std::snprintf(key, sizeof(key), "smp%d", (int)c.value + 1);
+                setParam(pInstrument, (float)(kFirstUser + (int)c.value));
+                requestStateFile(key);
+                break;
+            }
+            case ctClearSmp:
+            {
+                char key[8]; std::snprintf(key, sizeof(key), "smp%d", (int)c.value + 1);
+                fSmpPath[(int)c.value].clear(); setState(key, "");
+                break;
+            }
+            case ctRootDn:
+            case ctRootUp:
+            {
+                const int k = (int)c.value;
+                fRoot[k] = clampi(fRoot[k] + (c.type == ctRootUp ? 1 : -1) * ((ev.mod & kModifierShift) ? 12 : 1), 0, 127);
+                char key[8], val[8]; std::snprintf(key, sizeof(key), "root%d", k + 1); std::snprintf(val, sizeof(val), "%d", fRoot[k]);
+                setState(key, val);
+                break;
+            }
+            case ctEditOpen: fEditor = true; fEditUser = (int)std::lround(fParams[pDrumPattern]) >= kNumPresetPatterns ? (int)std::lround(fParams[pDrumPattern]) - kNumPresetPatterns : fEditUser; break;
+            case ctEditClose: fEditor = false; break;
+            case ctEditUser: fEditUser = (int)c.value; setParam(pDrumPattern, (float)(kNumPresetPatterns + fEditUser)); break;
+            case ctEditLen: fULen[fEditUser] = fULen[fEditUser] == 16 ? 12 : 16; commitPattern(fEditUser); break;
+            case ctEditClear:
+                for (int l = 0; l < kDrumLanes; ++l) std::memset(fUL[fEditUser][l], '-', 16);
+                commitPattern(fEditUser); break;
+            case ctEditCopy: copyPreset(fEditUser, fLastPreset); commitPattern(fEditUser); break;
+            case ctCell:
+            {
+                const int lane = (int)c.value / 16, st = (int)c.value % 16;
+                if (st >= fULen[fEditUser]) break;
+                char& ch = fUL[fEditUser][lane][st];
+                if (ev.button == kMouseButtonRight) ch = '-';
+                else ch = ch == '-' ? 'x' : (ch == 'x' ? 'X' : (ch == 'X' ? 'g' : '-'));
+                commitPattern(fEditUser);
+                break;
+            }
             }
             repaint();
             return true;
@@ -188,7 +256,7 @@ protected:
         for (int i = 0; i < fCtlCount; ++i)
         {
             const Control& c = fCtl[i];
-            if (c.type != ctKnob || !c.b.hit(px, py)) continue;
+            if (c.type != ctKnob || !visible(c) || !c.b.hit(px, py)) continue;
             const ParamInfo& p = kParams[c.param];
             float v = norm(c.param) + (float)ev.delta.getY() * 0.03f;
             v = v < 0 ? 0 : (v > 1 ? 1 : v);
@@ -213,44 +281,120 @@ private:
         editParameter(p, false);
         repaint();
     }
-    void addCtl(CtlType t, int param, float value, float x, float y, float w, float h, const char* label = nullptr)
+    void addCtl(CtlType t, int param, float value, float x, float y, float w, float h, const char* label = nullptr, int group = gAlways)
     {
-        if (fCtlCount >= 96) return;
+        if (fCtlCount >= kMaxCtl) return;
         Control& c = fCtl[fCtlCount++];
-        c.type = t; c.param = param; c.value = value; c.b.x = x; c.b.y = y; c.b.w = w; c.b.h = h; c.label = label;
+        c.type = t; c.param = param; c.value = value; c.b.x = x; c.b.y = y; c.b.w = w; c.b.h = h; c.label = label; c.group = group;
+    }
+    bool visible(const Control& c) const
+    {
+        if (fEditor) return c.group == gEditor;
+        if (c.group == gEditor) return false;
+        if (c.group == gFM) return fEraTab == eraPC98;
+        if (c.group == gXP) return fEraTab == eraXP;
+        if (c.group == gUser) return fEraTab == eraUser;
+        return true;
+    }
+
+    // ---- user drum patterns (same text format as the DSP: 9 lanes joined by '|', then ';len')
+    void copyPreset(int u, int pi)
+    {
+        pi = clampi(pi, 0, kNumPresetPatterns - 1);
+        const DrumPattern& P = kPatterns[pi];
+        for (int l = 0; l < kDrumLanes; ++l)
+        {
+            std::memset(fUL[u][l], '-', 16); fUL[u][l][16] = 0;
+            for (int k = 0; k < P.len && P.lane[l][k]; ++k) fUL[u][l][k] = P.lane[l][k];
+        }
+        fULen[u] = P.len;
+    }
+    void parsePattern(int u, const char* str)
+    {
+        int lane = 0, k = 0;
+        for (int l = 0; l < kDrumLanes; ++l) { std::memset(fUL[u][l], '-', 16); fUL[u][l][16] = 0; }
+        const char* semi = std::strchr(str, ';');
+        fULen[u] = (semi && std::atoi(semi + 1) == 12) ? 12 : 16;
+        for (const char* c = str; *c && c != semi && lane < kDrumLanes; ++c)
+        {
+            if (*c == '|') { ++lane; k = 0; continue; }
+            if (k < 16) fUL[u][lane][k++] = (*c == 'X' || *c == 'x' || *c == 'g') ? *c : '-';
+        }
+    }
+    void commitPattern(int u)
+    {
+        char buf[256]; int n = 0;
+        for (int l = 0; l < kDrumLanes; ++l) { for (int k = 0; k < fULen[u]; ++k) buf[n++] = fUL[u][l][k]; buf[n++] = '|'; }
+        n += std::snprintf(buf + n, sizeof(buf) - n, ";%d", fULen[u]);
+        char key[8]; std::snprintf(key, sizeof(key), "pat%d", u + 1);
+        setState(key, buf);
+        if ((int)std::lround(fParams[pDrumPattern]) != kNumPresetPatterns + u) setParam(pDrumPattern, (float)(kNumPresetPatterns + u));
+    }
+    char patStep(int pat, int lane, int st) const
+    {
+        if (pat < kNumPresetPatterns) { const DrumPattern& P = kPatterns[pat]; return st < P.len ? P.lane[lane][st] : '-'; }
+        const int u = pat - kNumPresetPatterns;
+        return st < fULen[u] ? fUL[u][lane][st] : '-';
+    }
+    int patLen(int pat) const { return pat < kNumPresetPatterns ? kPatterns[pat].len : fULen[pat - kNumPresetPatterns]; }
+    static void noteName(int n, char* out, size_t sz)
+    {
+        static const char* const nm[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+        std::snprintf(out, sz, "%s%d", nm[n % 12], n / 12 - 1);
     }
     bool hover(const Box& b) const { return b.hit(fMouseX, fMouseY); }
 
     void buildLayout()
     {
-        // instrument grid (left panel)
-        for (int i = 0; i < 24; ++i)
+        // era tabs
+        static const char* const tabs[3] = { "PC-98 \xE2\x80\xA2 90s", "WIN XP \xE2\x80\xA2 00s", "MY SAMPLES" };
+        static const float tx[3] = { 24.f, 104.f, 186.f }, tw[3] = { 78.f, 80.f, 68.f };
+        for (int i = 0; i < 3; ++i) addCtl(ctEraTab, pInstrument, (float)i, tx[i], 82.f, tw[i], 22.f, tabs[i]);
+        // PC-98 FM list
+        for (int i = 0; i < kNumFM; ++i)
+            addCtl(ctSelect, pInstrument, (float)i, 26.f + (i % 2) * 117.f, 110.f + (i / 2) * 27.f, 112.f, 23.f, kInstrumentNames[i], gFM);
+        // Windows XP / 2000s list
+        for (int i = 0; i < kNumXP; ++i)
+            addCtl(ctSelect, pInstrument, (float)(kFirstXP + i), 26.f + (i % 2) * 117.f, 108.f + (i / 2) * 22.f, 112.f, 19.f, kInstrumentNames[kFirstXP + i], gXP);
+        // user sample slots
+        for (int k = 0; k < kNumUser; ++k)
         {
-            const int col = i % 2, row = i / 2;
-            addCtl(ctSelect, pInstrument, (float)i, 26.f + col * 117.f, 84.f + row * 29.f, 112.f, 25.f, kInstrumentNames[i]);
+            const float y = 110.f + k * 82.f;
+            addCtl(ctSelect,   pInstrument, (float)(kFirstUser + k), 26.f, y + 4, 224.f, 22.f, kInstrumentNames[kFirstUser + k], gUser);
+            addCtl(ctLoad,     pInstrument, (float)k, 26.f,  y + 48, 62.f, 22.f, "LOAD", gUser);
+            addCtl(ctClearSmp, pInstrument, (float)k, 92.f,  y + 48, 54.f, 22.f, "CLEAR", gUser);
+            addCtl(ctRootDn,   pInstrument, (float)k, 152.f, y + 48, 24.f, 22.f, "\xE2\x97\x80", gUser);
+            addCtl(ctRootUp,   pInstrument, (float)k, 226.f, y + 48, 24.f, 22.f, "\xE2\x96\xB6", gUser);
         }
         // knobs (right panel)
         static const int knobs[8] = { pVolume, pBrightness, pRelease, pVibDepth, pLofi, pChorus, pReverb, pVelSens };
         static const char* const klab[8] = { "VOLUME", "BRIGHT", "RELEASE", "VIBRATO", "LO-FI", "CHORUS", "REVERB", "VELOCITY" };
         for (int i = 0; i < 8; ++i)
-        {
-            const int col = i % 2, row = i / 2;
-            addCtl(ctKnob, knobs[i], 0, 716.f + col * 114.f, 84.f + row * 88.f, 104.f, 84.f, klab[i]);
-        }
+            addCtl(ctKnob, knobs[i], 0, 716.f + (i % 2) * 114.f, 84.f + (i / 2) * 88.f, 104.f, 84.f, klab[i]);
         // top bar actions
         addCtl(ctAction, pInstrument, aPrev,   640.f, 10.f, 40.f, 26.f, "\xE2\x97\x80");
         addCtl(ctAction, pInstrument, aNext,   684.f, 10.f, 40.f, 26.f, "\xE2\x96\xB6");
         addCtl(ctAction, pInstrument, aRandom, 728.f, 10.f, 104.f, 26.f, "RANDOM");
         // drums
-        for (int i = 0; i < 3; ++i) addCtl(ctSelect, pDrumMode, (float)i, 120.f + i * 70.f, 554.f, 66.f, 24.f, i == 0 ? "OFF" : (i == 1 ? "SYNC" : "ALWAYS"));
-        for (int i = 0; i < 3; ++i) addCtl(ctSelect, pDrumKit, (float)i, 350.f + i * 74.f, 554.f, 70.f, 24.f, i == 0 ? "PC-98" : (i == 1 ? "808" : "8-BIT"));
-        addCtl(ctToggle, pDrumFill, 0, 584.f, 554.f, 74.f, 24.f, "FILLS");
+        static const char* const modes[3] = { "OFF", "SYNC", "ALWAYS" };
+        static const char* const kits[4] = { "PC-98", "808", "8-BIT", "LIVE" };
+        for (int i = 0; i < 3; ++i) addCtl(ctSelect, pDrumMode, (float)i, 110.f + i * 62.f, 552.f, 58.f, 24.f, modes[i]);
+        for (int i = 0; i < 4; ++i) addCtl(ctSelect, pDrumKit, (float)i, 304.f + i * 64.f, 552.f, 60.f, 24.f, kits[i]);
+        addCtl(ctToggle, pDrumFill, 0, 566.f, 552.f, 64.f, 24.f, "FILLS");
+        addCtl(ctEditOpen, pDrumPattern, 0, 636.f, 552.f, 74.f, 24.f, "EDIT \xE2\x9C\x8E");
         addCtl(ctKnob, pDrumVolume, 0, 868.f, 540.f, 72.f, 104.f, "DRUM VOL");
-        for (int i = 0; i < 12; ++i)
-        {
-            const int col = i % 6, row = i / 6;
-            addCtl(ctSelect, pDrumPattern, (float)i, 30.f + col * 88.f, 588.f + row * 28.f, 84.f, 24.f, kPatterns[i].name);
-        }
+        for (int i = 0; i < kNumPatterns; ++i)
+            addCtl(ctSelect, pDrumPattern, (float)i, 26.f + (i % 8) * 69.f, 586.f + (i / 8) * 28.f, 65.f, 23.f,
+                   i < kNumPresetPatterns ? kPatterns[i].name : kUserPatternNames[i - kNumPresetPatterns]);
+        // drum editor overlay
+        addCtl(ctEditClose, 0, 0, 786.f, 68.f, 26.f, 26.f, "\xE2\x9C\x95", gEditor);
+        for (int u = 0; u < 4; ++u) addCtl(ctEditUser, 0, (float)u, 160.f + u * 78.f, 100.f, 72.f, 24.f, kUserPatternNames[u], gEditor);
+        addCtl(ctEditLen,   0, 0, 476.f, 100.f, 92.f, 24.f, "", gEditor);
+        addCtl(ctEditClear, 0, 0, 574.f, 100.f, 62.f, 24.f, "CLEAR", gEditor);
+        addCtl(ctEditCopy,  0, 0, 642.f, 100.f, 160.f, 24.f, "", gEditor);
+        for (int l = 0; l < kDrumLanes; ++l)
+            for (int st = 0; st < 16; ++st)
+                addCtl(ctCell, 0, (float)(l * 16 + st), 238.f + st * 35.f, 140.f + l * 31.f, 33.f, 28.f, nullptr, gEditor);
     }
 
     void label(float x, float y, const char* s, float size, const Color& c, int align)
@@ -299,14 +443,14 @@ private:
         fill();
 
         // stars for night / sparkles for dusk
-        if (C.ce == ceMoon || C.pt == ptSparkle)
+        if (C.ce == ceMoon || C.ce == ceRedMoon || C.pt == ptSparkle)
         {
             for (int i = 0; i < 70; ++i)
             {
                 const float x = hash01(i * 3 + 1) * kW, y = hash01(i * 3 + 2) * 330.f;
                 const float tw = 0.45f + 0.55f * std::sin(fT * (1.2f + hash01(i) * 2.f) + i);
                 beginPath(); circle(x, y, 0.8f + hash01(i * 7) * 1.4f);
-                fillColor(Color(255, 255, 240, (C.ce == ceMoon ? 0.85f : 0.45f) * tw)); fill();
+                fillColor(Color(255, 255, 240, (C.ce == ceMoon || C.ce == ceRedMoon ? 0.85f : 0.45f) * tw)); fill();
             }
         }
         // sun / moon
@@ -329,8 +473,15 @@ private:
             beginPath(); circle(790, 110, 38); fillColor(Color(250, 248, 230)); fill();
             beginPath(); circle(774, 100, 34); fillColor(hexc(C.skyTop, 0.92f)); fill();
         }
+        else if (C.ce == ceRedMoon)
+        {
+            beginPath(); circle(790, 120, 150);
+            fillPaint(radialGradient(790, 120, 30, 150, Color(255, 60, 70, 0.45f), Color(160, 0, 30, 0.f))); fill();
+            beginPath(); circle(790, 120, 46); fillPaint(radialGradient(780, 110, 5, 50, Color(255, 170, 160), Color(200, 30, 50))); fill();
+            beginPath(); ellipse(800, 128, 9, 6); ellipse(774, 108, 6, 5); fillColor(Color(150, 20, 40, 0.45f)); fill();
+        }
         // clouds
-        if (C.ce != ceMoon)
+        if (C.ce != ceMoon && C.ce != ceRedMoon)
         {
             for (int i = 0; i < 5; ++i)
             {
@@ -351,7 +502,7 @@ private:
             const float bx = i * 46.f - 20 + hash01(i + 140) * 10;
             beginPath(); rect(bx, 400 - bh, bw, bh + 80);
             fillColor(mixc(C.horizon, 0x2a2440, 0.35f + hash01(i) * 0.15f, 0.55f)); fill();
-            if (C.ce == ceMoon || C.ce == ceSunset)
+            if (C.ce == ceMoon || C.ce == ceSunset || C.ce == ceRedMoon)
                 for (int w = 0; w < 6; ++w)
                 {
                     if (hash01(i * 13 + w) < 0.45f) continue;
@@ -720,6 +871,37 @@ private:
             beginPath(); rect(-1.6f, 2.62f, 3.2f, 0.05f); fillColor(hexc(C.collar)); fill();
             break;
         }
+        case ofGothic:
+        {
+            // lace collar: two rows of white scallops along the neckline
+            for (int row = 0; row < 2; ++row)
+                for (int k = -6; k <= 6; ++k)
+                {
+                    const float t = k / 6.f, cx = t * (0.5f + row * 0.12f), cy = 1.18f + std::fabs(t) * 0.12f + row * 0.11f;
+                    beginPath(); circle(cx, cy, 0.075f - row * 0.01f);
+                    fillColor(row ? Color(235, 228, 240) : hexc(C.collar)); fill();
+                    strokeWidth(0.01f); strokeColor(Color(150, 140, 160)); stroke();
+                }
+            // corset lacing
+            strokeWidth(0.02f); strokeColor(hexc(C.ribbon, 0.9f));
+            for (int k = 0; k < 5; ++k)
+            {
+                const float y0 = 1.85f + k * 0.18f;
+                beginPath(); moveTo(-0.14f, y0); lineTo(0.14f, y0 + 0.12f); stroke();
+                beginPath(); moveTo(0.14f, y0); lineTo(-0.14f, y0 + 0.12f); stroke();
+            }
+            // puff sleeves with lace trim
+            for (int sd = -1; sd <= 1; sd += 2)
+            {
+                beginPath(); ellipse(sd * 1.18f, 1.72f, 0.26f, 0.3f); fillColor(mixc(C.outfit, 0x4a3a56, 0.35f)); fill();
+                strokeWidth(0.015f); strokeColor(Color(10, 6, 14)); stroke();
+                for (int k = 0; k < 4; ++k) { beginPath(); circle(sd * (1.03f + k * 0.1f), 1.98f + (k % 2) * 0.02f, 0.045f); fillColor(hexc(C.collar)); fill(); }
+            }
+            // rose brooch
+            beginPath(); circle(0, 1.55f, 0.12f); fillPaint(radialGradient(-0.03f, 1.52f, 0.01f, 0.13f, Color(255, 90, 110), hexc(C.ribbon))); fill();
+            strokeWidth(0.015f); strokeColor(Color(90, 0, 20)); beginPath(); arc(0, 1.55f, 0.06f, 0.5f, 5.0f, CW); stroke();
+            break;
+        }
         }
     }
 
@@ -995,6 +1177,19 @@ private:
             fillColor(Color(255, 255, 255, 0.9f)); drawFlower(x + 0.2f, y + 0.08f, 0.12f);
             break;
         }
+        case acHeaddress:
+        {
+            // black lace headdress with a red rose
+            beginPath(); arc(0, -0.05f, 0.9f, 3.55f, 5.87f, CW); strokeWidth(0.13f); strokeColor(Color(24, 18, 28)); lineCap(ROUND); stroke();
+            for (int k = 0; k <= 12; ++k)
+            {
+                const float a = 3.6f + k * (2.22f / 12.f);
+                beginPath(); circle(std::cos(a) * 0.98f, -0.05f + std::sin(a) * 0.98f, 0.06f); fillColor(Color(245, 240, 248)); fill();
+            }
+            fillColor(Color(176, 16, 42)); drawFlower(-0.62f, -0.78f, 0.17f);
+            beginPath(); circle(-0.62f, -0.78f, 0.06f); fillColor(Color(110, 0, 20)); fill();
+            break;
+        }
         case acNone:
             break;
         }
@@ -1022,7 +1217,12 @@ private:
         beginPath(); rect(0, 45, kW, 2); fillColor(hexc(C.accent, 0.8f)); fill();
         fillColor(hexc(C.accent)); drawFlower(26, 23, 13);
         outlinedLabel(48, 31, "RETRO NOVEL FM", 22.f, hexc(C.accent), Color(255, 255, 255), ALIGN_LEFT | ALIGN_BASELINE, 2.f);
-        label(250, 30, "FM synth  \xE2\x99\xA5  drum machine  \xE2\x99\xA5  PC-98 style", 12.f, Color(120, 90, 130), ALIGN_LEFT | ALIGN_BASELINE);
+        {
+            const int ci = clampi((int)std::lround(fParams[pInstrument]), 0, kNumInstruments - 1);
+            static const char* const eras[3] = { "\xE2\x99\xAA PC-98 / 90s FM", "\xE2\x99\xAA Windows XP / 2000s VN", "\xE2\x99\xAA My samples" };
+            label(250, 30, eras[eraOf(ci)], 13.f, hexc(C.accent), ALIGN_LEFT | ALIGN_BASELINE);
+            label(440, 30, "FM \xE2\x99\xA5 samples \xE2\x99\xA5 drums", 11.f, Color(120, 90, 130), ALIGN_LEFT | ALIGN_BASELINE);
+        }
 
         for (int i = 0; i < fCtlCount; ++i)
         {
@@ -1035,31 +1235,74 @@ private:
             strokeWidth(1.5f); strokeColor(Color(255, 255, 255, 0.9f)); stroke();
             label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, c.label, 13.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
         }
-        label(940, 30, "v2.0", 11.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
+        label(940, 30, "v3.0", 11.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
+    }
+
+    void pill(const Box& b, bool sel, bool hv, uint32_t accent, float r = 11.f)
+    {
+        beginPath(); roundedRect(b.x, b.y, b.w, b.h, r);
+        if (sel) fillPaint(linearGradient(0, b.y, 0, b.y + b.h, hexc(accent), mixc(accent, 0x60305a, 0.35f)));
+        else fillColor(hv ? Color(255, 225, 238, 0.95f) : Color(255, 255, 255, 0.78f));
+        fill();
+        strokeWidth(1.f); strokeColor(sel ? Color(255, 255, 255) : hexc(accent, 0.45f)); stroke();
     }
 
     void drawInstrumentPanel()
     {
         glassPanel(16, 56, 244, 390, 0xff7fae);
         panelTitle(28, 72, "INSTRUMENT", 0xff7fae);
-        const int cur = clampi((int)std::lround(fParams[pInstrument]), 0, 23);
+        const int cur = clampi((int)std::lround(fParams[pInstrument]), 0, kNumInstruments - 1);
+        char buf[64];
         for (int i = 0; i < fCtlCount; ++i)
         {
             const Control& c = fCtl[i];
-            if (c.type != ctSelect || c.param != pInstrument) continue;
-            const int idx = (int)c.value;
-            const CharacterDef& hc = kChars[kFlavor[idx].ch];
-            const bool sel = idx == cur, h = hover(c.b);
-            beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 12);
-            if (sel) fillPaint(linearGradient(0, c.b.y, 0, c.b.y + c.b.h, hexc(hc.accent), mixc(hc.accent, 0x60305a, 0.35f)));
-            else fillColor(h ? Color(255, 225, 238, 0.95f) : Color(255, 255, 255, 0.75f));
-            fill();
-            strokeWidth(1.f); strokeColor(sel ? Color(255, 255, 255) : hexc(hc.accent, 0.45f)); stroke();
-            // colour dot = which heroine plays it
-            beginPath(); circle(c.b.x + 11, c.b.y + c.b.h / 2, 5);
-            fillColor(hexc(hc.hair)); fill(); strokeWidth(1.f); strokeColor(hexc(hc.hairDark)); stroke();
-            label(c.b.x + 21, c.b.y + c.b.h / 2 + 1, c.label, 11.5f, sel ? Color(255, 255, 255) : Color(80, 50, 90), ALIGN_LEFT | ALIGN_MIDDLE);
+            if (c.type == ctEraTab)
+            {
+                const bool sel = fEraTab == (int)c.value;
+                pill(c.b, sel, hover(c.b), 0xff7fae, 8.f);
+                label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, c.label, 9.5f, sel ? Color(255, 255, 255) : Color(80, 50, 90), ALIGN_CENTER | ALIGN_MIDDLE);
+                if (eraOf(cur) == (int)c.value && !sel) { beginPath(); circle(c.b.x + c.b.w - 6, c.b.y + 5, 3); fillColor(hexc(0xff4f8b)); fill(); }
+                continue;
+            }
+            if (!visible(c) || (c.group != gFM && c.group != gXP && c.group != gUser)) continue;
+            if (c.type == ctSelect)
+            {
+                const int idx = (int)c.value;
+                const CharacterDef& hc = kChars[kFlavor[idx].ch];
+                const bool sel = idx == cur;
+                pill(c.b, sel, hover(c.b), hc.accent, c.b.h * 0.5f);
+                beginPath(); circle(c.b.x + 11, c.b.y + c.b.h / 2, c.b.h < 21 ? 4.f : 5.f);
+                fillColor(hexc(hc.hair)); fill(); strokeWidth(1.f); strokeColor(hexc(hc.hairDark)); stroke();
+                label(c.b.x + 21, c.b.y + c.b.h / 2 + 1, c.label, c.b.h < 21 ? 10.5f : 11.5f, sel ? Color(255, 255, 255) : Color(80, 50, 90), ALIGN_LEFT | ALIGN_MIDDLE);
+                if (c.group == gUser)
+                {
+                    const int k = idx - kFirstUser;
+                    // slot card background, file name and root note
+                    const float y = c.b.y - 4;
+                    beginPath(); roundedRect(22, y, 232, 76, 10); strokeWidth(1.f); strokeColor(hexc(hc.accent, 0.35f)); stroke();
+                    const char* fn = fSmpPath[k].empty() ? "(empty - press LOAD)" : baseName(fSmpPath[k].c_str());
+                    std::snprintf(buf, sizeof(buf), "%s", fn);
+                    char* end = const_cast<char*>(utf8advance(buf, 30)); *end = 0;
+                    label(30, y + 42, buf, 10.f, fSmpPath[k].empty() ? Color(150, 120, 160) : Color(70, 40, 90), ALIGN_LEFT | ALIGN_BASELINE);
+                    char nn[8]; noteName(fRoot[k], nn, sizeof(nn));
+                    std::snprintf(buf, sizeof(buf), "root %s", nn);
+                    label(201, y + 63, buf, 10.f, Color(80, 50, 90), ALIGN_CENTER | ALIGN_MIDDLE);
+                }
+            }
+            else
+            {
+                const CharacterDef& hc = kChars[5];
+                pill(c.b, false, hover(c.b), hc.accent, 8.f);
+                label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, c.label, 10.f, Color(80, 50, 90), ALIGN_CENTER | ALIGN_MIDDLE);
+            }
         }
+    }
+
+    static const char* baseName(const char* p)
+    {
+        const char* b = p;
+        for (const char* c = p; *c; ++c) if (*c == '/' || *c == '\\') b = c + 1;
+        return b;
     }
 
     void drawKnob(const Control& c, uint32_t accent, bool small = false)
@@ -1139,62 +1382,123 @@ private:
         const float x = 16, y = 540, w = 928, h = 112;
         glassPanel(x, y, w, h, C.accent);
         const float beat = fParams[pOutBeat];
-        fillColor(hexc(C.accent)); drawFlower(36, 566, 9 + beat * 4);
-        label(52, 572, "DRUMS", 15.f, Color(70, 40, 90), ALIGN_LEFT | ALIGN_BASELINE);
+        fillColor(hexc(C.accent)); drawFlower(32, 564, 8 + beat * 4);
+        label(46, 570, "DRUMS", 14.f, Color(70, 40, 90), ALIGN_LEFT | ALIGN_BASELINE);
 
         const int mode = (int)std::lround(fParams[pDrumMode]);
+        const int pat = clampi((int)std::lround(fParams[pDrumPattern]), 0, kNumPatterns - 1);
         for (int i = 0; i < fCtlCount; ++i)
         {
             const Control& c = fCtl[i];
+            if (c.group == gEditor) continue;
             if (c.param != pDrumMode && c.param != pDrumKit && c.param != pDrumPattern && c.param != pDrumFill) continue;
+            if (c.type == ctKnob) continue;
             bool sel;
             if (c.type == ctToggle) sel = fParams[c.param] > 0.5f;
+            else if (c.type == ctEditOpen) sel = fEditor;
             else sel = (int)std::lround(fParams[c.param]) == (int)c.value;
-            const bool hv = hover(c.b);
-            beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 11);
-            if (sel) fillPaint(linearGradient(0, c.b.y, 0, c.b.y + c.b.h, hexc(C.accent), mixc(C.accent, 0x60305a, 0.35f)));
-            else fillColor(hv ? Color(255, 225, 238, 0.95f) : Color(255, 255, 255, 0.8f));
-            fill();
-            strokeWidth(1.f); strokeColor(sel ? Color(255, 255, 255) : hexc(C.accent, 0.45f)); stroke();
+            const bool isUser = c.param == pDrumPattern && c.type == ctSelect && c.value >= kNumPresetPatterns;
+            pill(c.b, sel, hover(c.b), isUser ? 0x8a5cff : C.accent);
             char buf[48];
             if (c.type == ctToggle) std::snprintf(buf, sizeof(buf), "%s %s", sel ? "\xE2\x9C\x93" : "\xE2\x97\x8B", c.label);
             else std::snprintf(buf, sizeof(buf), "%s", c.label);
-            label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, buf, 11.f, sel ? Color(255, 255, 255) : Color(80, 50, 90), ALIGN_CENTER | ALIGN_MIDDLE);
+            label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, buf, c.param == pDrumPattern && c.type == ctSelect ? 9.5f : 10.5f,
+                  sel ? Color(255, 255, 255) : (isUser ? Color(90, 50, 150) : Color(80, 50, 90)), ALIGN_CENTER | ALIGN_MIDDLE);
         }
 
-        // step view: kick / snare+clap / hats
-        const int pat = clampi((int)std::lround(fParams[pDrumPattern]), 0, 11);
-        const DrumPattern& P = kPatterns[pat];
+        // step view: kick / snare+clap+rim / hats
         const int step = (int)std::lround(fParams[pOutDrumStep]);
-        const float gx = 566, gy = 590, cw = 290.f / 16.f, chh = 14.f;
+        const int len = patLen(pat);
+        const float gx = 604, gy = 588, cw = 16.f, chh = 14.f;
         static const char* const rows[3] = { "K", "S", "H" };
         for (int r = 0; r < 3; ++r)
         {
-            label(gx - 8, gy + r * (chh + 3) + chh / 2 + 1, rows[r], 10.f, Color(110, 80, 120), ALIGN_RIGHT | ALIGN_MIDDLE);
-            for (int s = 0; s < 16; ++s)
+            label(gx - 6, gy + r * (chh + 3) + chh / 2 + 1, rows[r], 9.f, Color(110, 80, 120), ALIGN_RIGHT | ALIGN_MIDDLE);
+            for (int s2 = 0; s2 < 16; ++s2)
             {
-                const float cx = gx + s * cw, cy = gy + r * (chh + 3);
+                const float cx = gx + s2 * cw, cy = gy + r * (chh + 3);
                 float v = 0;
-                if (s < P.len)
+                if (s2 < len)
                 {
-                    if (r == 0) v = stepVel(P.lane[dKick][s]);
-                    else if (r == 1) v = std::fmax(stepVel(P.lane[dSnare][s]), std::fmax(stepVel(P.lane[dClap][s]), stepVel(P.lane[dRim][s])));
-                    else v = std::fmax(stepVel(P.lane[dCHat][s]), stepVel(P.lane[dOHat][s]));
+                    if (r == 0) v = stepVel(patStep(pat, dKick, s2));
+                    else if (r == 1) v = std::fmax(stepVel(patStep(pat, dSnare, s2)), std::fmax(stepVel(patStep(pat, dClap, s2)), stepVel(patStep(pat, dRim, s2))));
+                    else v = std::fmax(stepVel(patStep(pat, dCHat, s2)), stepVel(patStep(pat, dOHat, s2)));
                 }
                 beginPath(); roundedRect(cx + 1, cy, cw - 2, chh, 3);
-                const bool now = (s == step) && mode > 0;
-                if (s >= P.len) fillColor(Color(200, 190, 210, 0.25f));
+                if (s2 >= len) fillColor(Color(200, 190, 210, 0.25f));
                 else if (v > 0) fillColor(hexc(C.accent, (mode > 0 ? 0.35f : 0.2f) + 0.6f * v * (mode > 0 ? 1.f : 0.5f)));
                 else fillColor(Color(255, 255, 255, 0.55f));
                 fill();
-                if (now) { strokeWidth(2.f); strokeColor(Color(90, 40, 110)); stroke(); }
-                if ((s & 3) == 0 && s < P.len) { beginPath(); rect(cx + 1, cy + chh + 1, cw - 2, 1); fillColor(Color(150, 120, 170, 0.5f)); fill(); }
+                if (s2 == step && mode > 0) { strokeWidth(2.f); strokeColor(Color(90, 40, 110)); stroke(); }
             }
         }
         const char* hint = mode == 0 ? "Drums off: choose SYNC or ALWAYS" : (mode == 1 ? "Plays when the DAW is playing" : "Plays all the time");
-        label(668, 571, hint, 10.f, Color(120, 90, 130), ALIGN_LEFT | ALIGN_BASELINE);
+        label(716, 569, hint, 9.5f, Color(120, 90, 130), ALIGN_LEFT | ALIGN_BASELINE);
 
-        for (int i = 0; i < fCtlCount; ++i) if (fCtl[i].param == pDrumVolume) drawKnob(fCtl[i], C.accent, true);
+        for (int i = 0; i < fCtlCount; ++i) if (fCtl[i].param == pDrumVolume && fCtl[i].type == ctKnob) drawKnob(fCtl[i], C.accent, true);
+    }
+
+    void drawEditor(const CharacterDef& C)
+    {
+        // dim everything behind
+        beginPath(); rect(0, 0, kW, kH); fillColor(Color(20, 10, 40, 0.45f)); fill();
+        glassPanel(140, 60, 680, 392, 0x8a5cff, 16.f);
+        fillColor(hexc(0x8a5cff)); drawFlower(160, 80, 9);
+        label(176, 86, "DRUM EDITOR", 16.f, Color(70, 40, 110), ALIGN_LEFT | ALIGN_BASELINE);
+        label(300, 86, "свои барабанные партии \xE2\x80\xA2 сохраняются в проекте", 10.5f, Color(120, 90, 150), ALIGN_LEFT | ALIGN_BASELINE);
+
+        const int u = fEditUser;
+        const int pat = clampi((int)std::lround(fParams[pDrumPattern]), 0, kNumPatterns - 1);
+        const int step = (int)std::lround(fParams[pOutDrumStep]);
+        const int mode = (int)std::lround(fParams[pDrumMode]);
+        char buf[64];
+        for (int i = 0; i < fCtlCount; ++i)
+        {
+            const Control& c = fCtl[i];
+            if (c.group != gEditor) continue;
+            const bool hv = hover(c.b);
+            switch (c.type)
+            {
+            case ctEditClose:
+                beginPath(); circle(c.b.x + 13, c.b.y + 13, 12); fillColor(hv ? Color(255, 120, 160) : Color(200, 170, 230)); fill();
+                label(c.b.x + 13, c.b.y + 14, c.label, 13.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
+                break;
+            case ctEditUser:
+            case ctEditLen:
+            case ctEditClear:
+            case ctEditCopy:
+            {
+                const bool sel = c.type == ctEditUser && (int)c.value == u;
+                pill(c.b, sel, hv, 0x8a5cff);
+                const char* t = c.label;
+                if (c.type == ctEditLen) { std::snprintf(buf, sizeof(buf), "%d STEPS", fULen[u]); t = buf; }
+                if (c.type == ctEditCopy) { std::snprintf(buf, sizeof(buf), "COPY \xE2\x86\x90 %s", kPatterns[fLastPreset].name); t = buf; }
+                label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, t, 10.5f, sel ? Color(255, 255, 255) : Color(70, 40, 110), ALIGN_CENTER | ALIGN_MIDDLE);
+                break;
+            }
+            case ctCell:
+            {
+                const int lane = (int)c.value / 16, st = (int)c.value % 16;
+                if (st == 0) label(c.b.x - 10, c.b.y + c.b.h / 2 + 1, kLaneNames[lane], 10.5f, Color(80, 50, 110), ALIGN_RIGHT | ALIGN_MIDDLE);
+                const bool off = st >= fULen[u];
+                const char chr = fUL[u][lane][st];
+                const float v = off ? 0.f : stepVel(chr);
+                beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 5);
+                if (off) fillColor(Color(200, 190, 210, 0.3f));
+                else if (v > 0) fillPaint(linearGradient(0, c.b.y, 0, c.b.y + c.b.h, hexc(C.accent, 0.35f + 0.65f * v), mixc(C.accent, 0x8a5cff, 0.5f, 0.35f + 0.65f * v)));
+                else fillColor((st / 4) % 2 ? Color(255, 255, 255, 0.85f) : Color(240, 232, 250, 0.9f));
+                fill();
+                strokeWidth(hv && !off ? 2.f : 1.f); strokeColor(hv && !off ? hexc(0x8a5cff) : Color(180, 160, 210, 0.7f)); stroke();
+                if (chr == 'X' && !off) label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, "!", 12.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
+                if (chr == 'g' && !off) label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, "\xC2\xB7", 14.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
+                if (pat == kNumPresetPatterns + u && mode > 0 && st == step)
+                { beginPath(); roundedRect(c.b.x - 1, c.b.y - 1, c.b.w + 2, c.b.h + 2, 6); strokeWidth(2.f); strokeColor(Color(90, 40, 110)); stroke(); }
+                break;
+            }
+            default: break;
+            }
+        }
+        label(480, 438, "клик: обычный \xE2\x86\x92 акцент (!) \xE2\x86\x92 тихий (\xC2\xB7) \xE2\x86\x92 пусто   \xE2\x80\xA2   правый клик \xE2\x80\x94 стереть", 10.5f, Color(110, 80, 140), ALIGN_CENTER | ALIGN_BASELINE);
     }
 
     static int utf8len(const char* s) { int n = 0; for (; *s; ++s) if ((*s & 0xC0) != 0x80) ++n; return n; }
@@ -1211,7 +1515,14 @@ private:
     int fPrevChar = 0;
     bool fInited = false;
 
-    Control fCtl[96];
+    static constexpr int kMaxCtl = 320;
+    Control fCtl[kMaxCtl];
+    int fEraTab = 0, fLastPreset = 0, fEditUser = 0;
+    bool fEditor = false;
+    std::string fSmpPath[4];
+    int fRoot[4] = {60, 60, 60, 60};
+    char fUL[4][kDrumLanes][17];
+    int fULen[4] = {16, 16, 16, 16};
     int fCtlCount = 0;
     int fDrag = -1;
     float fDragY = 0, fDragV = 0, fMouseX = -1, fMouseY = -1;

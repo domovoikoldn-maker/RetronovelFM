@@ -4,8 +4,13 @@
 #include <cmath>
 #include <cstring>
 #include <cstdint>
+#include <cstdlib>
+#include <memory>
+#include <vector>
 #include "RetroData.hpp"
 #include "RetroDrums.hpp"
+#include "RetroSampler.hpp"
+#include <string>
 
 namespace retrofm {
 
@@ -48,7 +53,61 @@ public:
     static constexpr int CHN = 16384;
     static constexpr int RB = 8192;
 
-    Engine() { for (int i = 0; i < kParamCount; ++i) params[i] = kParams[i].def; setSampleRate(44100.0); }
+    Engine() {
+        for (int i = 0; i < kParamCount; ++i) params[i] = kParams[i].def;
+        // pattern table: 12 presets + 4 user patterns (start as copies of a few presets)
+        for (int i = 0; i < kNumPresetPatterns; ++i) pats[i] = kPatterns[i];
+        static const int seed[4] = { 0, 5, 7, 11 };
+        for (int u = 0; u < 4; ++u) setUserPattern(u, patternToString(kPatterns[seed[u]]).c_str());
+        seq.setTable(pats);
+        setSampleRate(44100.0);
+    }
+
+    // ---- user drum patterns: "lane|lane|...(9)|;len" with chars X x g -
+    static std::string patternToString(const DrumPattern& P) {
+        std::string s;
+        for (int l = 0; l < kDrumLanes; ++l) { s += std::string(P.lane[l]).substr(0, P.len); s += '|'; }
+        s += ';'; s += std::to_string(P.len);
+        return s;
+    }
+    void setUserPattern(int u, const char* str) {
+        if (u < 0 || u >= 4 || !str) return;
+        char (*L)[17] = userLanes[u];
+        int len = 16;
+        const char* semi = std::strchr(str, ';');
+        if (semi) { len = std::atoi(semi + 1); if (len != 12) len = 16; }
+        int lane = 0, k = 0;
+        for (int l = 0; l < kDrumLanes; ++l) { std::memset(L[l], '-', 16); L[l][16] = 0; }
+        for (const char* c = str; *c && c != semi && lane < kDrumLanes; ++c) {
+            if (*c == '|') { ++lane; k = 0; continue; }
+            if (k < 16) L[lane][k++] = (*c == 'X' || *c == 'x' || *c == 'g') ? *c : '-';
+        }
+        DrumPattern& P = pats[kNumPresetPatterns + u];
+        P.name = kUserPatternNames[u]; P.len = len; P.swing = 0;
+        for (int l = 0; l < kDrumLanes; ++l) P.lane[l] = L[l];
+    }
+    std::string getUserPattern(int u) const { return patternToString(pats[kNumPresetPatterns + u]); }
+
+    // ---- user samples (call from a non-audio thread)
+    bool loadUserSample(int k, const char* path) {
+        if (k < 0 || k >= kNumUser) return false;
+        if (!path || !*path) { sampler.setUser(k, nullptr); userPath[k].clear(); return true; }
+        UserSample* u = new UserSample();
+        double rate = 44100;
+        if (!loadAudioFileMono(path, u->data, rate) || u->data.size() < 8) { delete u; return false; }
+        float pk = 0; for (float x : u->data) pk = std::max(pk, std::fabs(x));
+        if (pk > 0) for (float& x : u->data) x *= 0.9f / pk;
+        u->data.push_back(0); u->data.push_back(0);
+        u->zone.data = u->data.data(); u->zone.len = (uint32_t)u->data.size() - 2; u->zone.rate = rate; u->zone.root = 60;
+        u->path = path;
+        loaded.push_back(std::unique_ptr<UserSample>(u));   // kept alive until the plugin is destroyed
+        sampler.setUser(k, u);
+        userPath[k] = path;
+        return true;
+    }
+    void setUserRoot(int k, int n) { if (k >= 0 && k < kNumUser) { userRootNote[k] = n; sampler.setUserRoot(k, n); } }
+    const std::string& getUserPath(int k) const { return userPath[k]; }
+    int getUserRoot(int k) const { return userRootNote[k]; }
 
     void setSampleRate(double sr) {
         srate = sr;
@@ -61,7 +120,7 @@ public:
         std::memset(chb, 0, sizeof(chb));
         cw = 0; cph = vph = 0; hcnt = 0; held = 0;
         for (auto& v : voices) v.active = false;
-        drums.setSampleRate(sr); seq.setSampleRate(sr);
+        drums.setSampleRate(sr); seq.setSampleRate(sr); sampler.setSampleRate(sr);
         update();
     }
 
@@ -76,13 +135,17 @@ public:
             if (st == 0x90 && m3 > 0) drums.trigger(gmLane(m2), m3 / 127.0f);
             return;
         }
-        if (st == 0x90 && m3 > 0) noteOn(m2, m3);
-        else if (st == 0x80 || (st == 0x90 && m3 == 0)) noteOff(m2);
+        if (st == 0x90 && m3 > 0) {
+            const int inst = (int)std::floor(params[pInstrument] + 0.5f);
+            if (inst < kNumFM) noteOn(m2, m3);
+            else sampler.noteOn(inst, m2, m3, params[pTranspose]);
+        }
+        else if (st == 0x80 || (st == 0x90 && m3 == 0)) { noteOff(m2); sampler.noteOff(m2, pedal); }
         else if (st == 0xE0) { bend = ((m3 * 128 + m2) - 8192) / 8192.0; bendmul = std::pow(2.0, bend * params[pBendRange] / 12.0); }
         else if (st == 0xB0) {
             if (m2 == 1) modwheel = m3 / 127.0;
-            else if (m2 == 64) { bool p = m3 >= 64; if (pedal && !p) pedalUp(); pedal = p; }
-            else if (m2 == 120 || m2 == 123) allOff();
+            else if (m2 == 64) { bool p = m3 >= 64; if (pedal && !p) pedalUpAll(); pedal = p; }
+            else if (m2 == 120 || m2 == 123) { allOff(); sampler.allOff(); }
         }
     }
 
@@ -104,6 +167,8 @@ public:
         vph += vrateInc; if (vph >= 1) vph -= 1;
         const double pmul = bendmul * std::pow(2.0, std::sin(kTwoPi * vph) * (params[pVibDepth] + modwheel * 40) / 1200.0);
         double mix = 0, act = 0;
+        float sL = 0, sR = 0;
+        act += sampler.tick(pmul, sL, sR) * 0.8;
         for (auto& v : voices) {
             if (!v.active) continue;
             const double base = v.inc * pmul;
@@ -134,7 +199,8 @@ public:
         }
 
         activity += ((act > 1 ? 1 : act) - activity) * 0.0005;
-        double dry = mix * norm * gain;
+        double dry = mix * norm * gain + (sL + sR) * 0.5 * gain * 1.6;
+        const double side = (sL - sR) * 0.5 * gain * 1.6;
         if (lofi > 0) {
             if (++hcnt >= hold) { hcnt = 0; held = std::floor(dry * q + 0.5) / q; }
             dry = held;
@@ -145,8 +211,8 @@ public:
         const double tapR = chread((0.012 + 0.003 * std::cos(kTwoPi * cph)) * srate);
         if (++cw >= CHN) cw = 0;
         const double chm = params[pChorus];
-        const double L = dry * (1 - 0.4 * chm) + tapL * 0.7 * chm;
-        const double R = dry * (1 - 0.4 * chm) + tapR * 0.7 * chm;
+        const double L = dry * (1 - 0.4 * chm) + tapL * 0.7 * chm + side;
+        const double R = dry * (1 - 0.4 * chm) + tapR * 0.7 * chm - side;
 
         seq.tick(drums, params[pDrumFill] > 0.5f);
         const double dr = drums.tick() * drumGain;
@@ -203,6 +269,7 @@ private:
     }
     void release(Voice& v) { v.released = true; v.held = false; for (int k = 0; k < 4; ++k) v.stage[k] = 3; }
     void noteOff(int n) { for (auto& v : voices) if (v.active && v.note == n && !v.released) { if (pedal) v.held = true; else release(v); } }
+    void pedalUpAll() { pedalUp(); sampler.pedalUp(); }
     void pedalUp() { for (auto& v : voices) if (v.active && v.held) release(v); }
     void allOff() { pedal = false; for (auto& v : voices) if (v.active) release(v); }
 
@@ -237,6 +304,8 @@ private:
         vrateInc = params[pVibRate] / srate;
         bendmul = std::pow(2.0, bend * params[pBendRange] / 12.0);
         seq.setPattern((int)std::floor(params[pDrumPattern] + 0.5f));
+        sampler.setRelease(params[pRelease]);
+        sampler.setBrightness(params[pBrightness]);
         drums.setKit((int)std::floor(params[pDrumKit] + 0.5f));
         drumGain = std::pow(10.0, params[pDrumVolume] / 20.0);
     }
@@ -271,6 +340,12 @@ private:
     double lofi = 0, q = 32768, held = 0; int hold = 1, hcnt = 0;
     double vph = 0, vrateInc = 0, cph = 0, bend = 0, bendmul = 1, modwheel = 0;
     bool pedal = false; uint32_t serial = 0;
+    Sampler sampler;
+    DrumPattern pats[kNumPatterns];
+    char userLanes[4][kDrumLanes][17];
+    std::string userPath[kNumUser];
+    int userRootNote[kNumUser] = {60, 60, 60, 60};
+    std::vector<std::unique_ptr<UserSample>> loaded;
     DrumSynth drums; DrumSequencer seq; double drumGain = 0.5, activity = 0;
     Voice voices[NV];
     float chb[CHN]; int cw = 0;

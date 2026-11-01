@@ -16,7 +16,7 @@ enum Param {
 struct ParamInfo { const char* name; const char* symbol; const char* unit; float def, min, max; bool integer; bool output; };
 
 static const ParamInfo kParams[kParamCount] = {
-    {"Instrument",       "instrument", "",      0,    0,   23, true,  false},
+    {"Instrument",       "instrument", "",      0,    0,   57, true,  false},
     {"Volume",           "volume",     "dB",   -8,  -40,    6, false, false},
     {"Brightness",       "brightness", "",      1,    0,    2, false, false},
     {"Release x",        "release",    "",      1, 0.1f,    4, false, false},
@@ -29,8 +29,8 @@ static const ParamInfo kParams[kParamCount] = {
     {"Transpose",        "transpose",  "st",    0,  -24,   24, true,  false},
     {"Velocity Sens",    "velsens",    "",      1,    0,    1, false, false},
     {"Drums",            "drummode",   "",      0,    0,    2, true,  false},
-    {"Drum Pattern",     "drumpattern","",      0,    0,   11, true,  false},
-    {"Drum Kit",         "drumkit",    "",      0,    0,    2, true,  false},
+    {"Drum Pattern",     "drumpattern","",      0,    0,   15, true,  false},
+    {"Drum Kit",         "drumkit",    "",      0,    0,    3, true,  false},
     {"Drum Volume",      "drumvolume", "dB",   -9,  -40,    6, false, false},
     {"Drum Fills",       "drumfill",   "",      1,    0,    1, true,  false},
     {"Activity",         "activity",   "",      0,    0,    1, false, true},
@@ -38,15 +38,33 @@ static const ParamInfo kParams[kParamCount] = {
     {"Beat",             "beat",       "",      0,    0,    1, false, true},
 };
 
-static const char* const kInstrumentNames[24] = {
+// eras: 0..23 PC-98 FM, 24..53 Windows XP / 2000s samples, 54..57 user sample slots
+static constexpr int kNumFM = 24, kNumXP = 30, kNumUser = 4;
+static constexpr int kFirstXP = kNumFM, kFirstUser = kNumFM + kNumXP;
+static constexpr int kNumInstruments = kNumFM + kNumXP + kNumUser;
+enum Era { eraPC98 = 0, eraXP, eraUser };
+static inline int eraOf(int inst) { return inst < kFirstXP ? eraPC98 : (inst < kFirstUser ? eraXP : eraUser); }
+
+static const char* const kInstrumentNames[kNumInstruments] = {
+    // PC-98 / 90s FM
     "FM E.Piano","Music Box","FM Strings","FM Brass","Slap Bass","Synth Bass",
     "PC-98 Lead","Flute","Clarinet","Organ","Harp","Marimba",
     "Vibraphone","Choir Pad","Celesta","Koto","Harpsichord","Oboe",
-    "Sitar","Steel Guitar","Warm Pad","Sine Lead","Tubular Bell","Kalimba"
+    "Sitar","Steel Guitar","Warm Pad","Sine Lead","Tubular Bell","Kalimba",
+    // Windows XP / 2000s VN (sampled)
+    "Grand Piano","Soft Piano","Music Box","Strings","Slow Strings","Pizzicato",
+    "Tremolo Str.","Cello","Harp","Flute","Clarinet","Oboe",
+    "Recorder","Ocarina","Glockenspiel","Vibraphone","Hand Bells","Kalimba",
+    "Zither","Harpsichord","Choir Aah","Nylon Guitar","Glass Pad","Dream Pad",
+    "Dark Piano","Horror Drone","Eerie Choir","Broken Box","Reverse Piano","Ghost Bells",
+    // user
+    "My Sample 1","My Sample 2","My Sample 3","My Sample 4"
 };
 
 static const char* const kDrumModeNames[3] = { "Off", "Sync to DAW", "Always" };
-static const char* const kDrumKitNames[3]  = { "PC-98 FM", "Analog 808", "8-bit Lo-Fi" };
+static const char* const kDrumKitNames[4]  = { "PC-98 FM", "Analog 808", "8-bit Lo-Fi", "Live 2000s" };
+static const char* const kUserPatternNames[4] = { "User 1", "User 2", "User 3", "User 4" };
+static constexpr int kNumPresetPatterns = 12, kNumPatterns = 16;
 
 // ---------------------------------------------------------------- drum patterns
 // lanes: Kick, Snare, Closed hat, Open hat, Clap, Low tom, High tom, Rim, Crash

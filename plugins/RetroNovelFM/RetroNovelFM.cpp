@@ -2,6 +2,9 @@
 #include "DistrhoPlugin.hpp"
 #include "RetroFMEngine.hpp"
 #include <memory>
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
 
 START_NAMESPACE_DISTRHO
 
@@ -9,7 +12,7 @@ class RetroNovelFM : public Plugin
 {
 public:
     RetroNovelFM()
-        : Plugin(retrofm::kParamCount, 0, 0),
+        : Plugin(retrofm::kParamCount, 0, 12),
           engine(new retrofm::Engine())
     {
         engine->setSampleRate(getSampleRate());
@@ -20,7 +23,7 @@ protected:
     const char* getDescription() const override { return "FM synth + drum machine in the style of PC-98 / 90s visual novels and RPG Maker music"; }
     const char* getMaker() const override { return "RetroNovel"; }
     const char* getLicense() const override { return "ISC"; }
-    uint32_t getVersion() const override { return d_version(2, 0, 0); }
+    uint32_t getVersion() const override { return d_version(3, 0, 0); }
 
     static void setEnum(Parameter& p, const char* const* names, int count)
     {
@@ -49,14 +52,15 @@ protected:
 
         switch (index)
         {
-        case retrofm::pInstrument: setEnum(p, retrofm::kInstrumentNames, 24); break;
+        case retrofm::pInstrument: setEnum(p, retrofm::kInstrumentNames, retrofm::kNumInstruments); break;
         case retrofm::pDrumMode:   setEnum(p, retrofm::kDrumModeNames, 3); break;
-        case retrofm::pDrumKit:    setEnum(p, retrofm::kDrumKitNames, 3); break;
+        case retrofm::pDrumKit:    setEnum(p, retrofm::kDrumKitNames, 4); break;
         case retrofm::pDrumPattern:
         {
-            const char* names[12];
-            for (int i = 0; i < 12; ++i) names[i] = retrofm::kPatterns[i].name;
-            setEnum(p, names, 12);
+            const char* names[retrofm::kNumPatterns];
+            for (int i = 0; i < retrofm::kNumPresetPatterns; ++i) names[i] = retrofm::kPatterns[i].name;
+            for (int i = 0; i < 4; ++i) names[retrofm::kNumPresetPatterns + i] = retrofm::kUserPatternNames[i];
+            setEnum(p, names, retrofm::kNumPatterns);
             break;
         }
         case retrofm::pDrumFill:
@@ -80,6 +84,53 @@ protected:
     {
         if (!retrofm::kParams[index].output)
             engine->setParam((int)index, value);
+    }
+
+    // ---------------------------------------------------------------- states
+    // smp1..4 = user sample paths, root1..4 = their root notes, pat1..4 = user drum patterns
+    void initState(uint32_t index, State& st) override
+    {
+        const int k = (int)(index % 4) + 1;
+        char key[16];
+        if (index < 4)
+        {
+            std::snprintf(key, sizeof(key), "smp%d", k);
+            st.key = key; st.defaultValue = ""; st.hints = kStateIsFilenamePath;
+            char label[32]; std::snprintf(label, sizeof(label), "My Sample %d", k); st.label = label;
+        }
+        else if (index < 8)
+        {
+            std::snprintf(key, sizeof(key), "root%d", k);
+            st.key = key; st.defaultValue = "60"; st.hints = 0;
+            char label[32]; std::snprintf(label, sizeof(label), "My Sample %d Root", k); st.label = label;
+        }
+        else
+        {
+            std::snprintf(key, sizeof(key), "pat%d", k);
+            st.key = key; st.defaultValue = engine->getUserPattern(k - 1).c_str(); st.hints = 0;
+            char label[32]; std::snprintf(label, sizeof(label), "User Pattern %d", k); st.label = label;
+        }
+    }
+
+    void setState(const char* key, const char* value) override
+    {
+        if (!key || !value || std::strlen(key) < 4) return;
+        const int k = key[std::strlen(key) - 1] - '1';
+        if (k < 0 || k > 3) return;
+        if (!std::strncmp(key, "smp", 3)) engine->loadUserSample(k, value);
+        else if (!std::strncmp(key, "root", 4)) engine->setUserRoot(k, std::atoi(value));
+        else if (!std::strncmp(key, "pat", 3)) engine->setUserPattern(k, value);
+    }
+
+    String getState(const char* key) const override
+    {
+        if (!key || std::strlen(key) < 4) return String();
+        const int k = key[std::strlen(key) - 1] - '1';
+        if (k < 0 || k > 3) return String();
+        if (!std::strncmp(key, "smp", 3)) return String(engine->getUserPath(k).c_str());
+        if (!std::strncmp(key, "root", 4)) return String(engine->getUserRoot(k));
+        if (!std::strncmp(key, "pat", 3)) return String(engine->getUserPattern(k).c_str());
+        return String();
     }
 
     void sampleRateChanged(double newSampleRate) override { engine->setSampleRate(newSampleRate); }

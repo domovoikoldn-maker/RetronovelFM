@@ -3,20 +3,21 @@
 #include <cmath>
 #include <cstdint>
 #include "RetroData.hpp"
+#include "RetroSampler.hpp"
 
 namespace retrofm {
 
 class DrumSynth {
 public:
     void setSampleRate(double sr) { srate = sr; for (auto& v : v_) v.active = false; }
-    void setKit(int k) { kit = k < 0 ? 0 : (k > 2 ? 2 : k); }
+    void setKit(int k) { kit = k < 0 ? 0 : (k > 3 ? 3 : k); }
 
     void trigger(int lane, float vel) {
         if (lane < 0 || lane >= kDrumLanes || vel <= 0) return;
         if (lane == dCHat) v_[dOHat].active = false;   // closed hat chokes open hat
         Voice& v = v_[lane];
         v.active = true; v.t = 0; v.vel = vel; v.ph = 0; v.ph2 = 0;
-        v.lp = v.bp = 0; v.hpz = 0;
+        v.lp = v.bp = 0; v.hpz = 0; v.spos = 0;
         pulse = 1.0f;
     }
 
@@ -29,6 +30,17 @@ public:
             if (!v.active) continue;
             const double t = v.t;
             double s = 0, amp = 1;
+            if (kit == 3) {   // live kit: CC0 recordings
+                const Zone& z = SampleBank::get().drum(lane);
+                const uint32_t i = (uint32_t)v.spos;
+                if (!z.data || i + 1 >= z.len) { v.active = false; continue; }
+                const float f = (float)(v.spos - i);
+                s = (z.data[i] * (1 - f) + z.data[i + 1] * f) * liveGain(lane);
+                v.spos += z.rate / srate;
+                out += s * v.vel;
+                v.t += dt;
+                continue;
+            }
             switch (lane) {
             case dKick: {
                 const double f0 = kit == 1 ? 120 : 170, f1 = kit == 1 ? 44 : 52;
@@ -103,7 +115,8 @@ public:
     float pulse = 0;
 
 private:
-    struct Voice { bool active = false; double t = 0, ph = 0, ph2 = 0, lp = 0, bp = 0, hpz = 0, mph[6] = {0,0,0,0,0,0}; float vel = 0; };
+    static float liveGain(int l) { static const float g[kDrumLanes] = { 1.0f, 0.75f, 0.45f, 0.4f, 0.55f, 0.7f, 0.65f, 0.5f, 0.4f }; return g[l]; }
+    struct Voice { double spos = 0; bool active = false; double t = 0, ph = 0, ph2 = 0, lp = 0, bp = 0, hpz = 0, mph[6] = {0,0,0,0,0,0}; float vel = 0; };
 
     static double laneGain(int lane) {
         static const double g[kDrumLanes] = { 0.95, 0.7, 1.1, 1.0, 0.38, 0.6, 0.55, 0.45, 0.85 };
@@ -138,7 +151,8 @@ private:
 class DrumSequencer {
 public:
     void setSampleRate(double sr) { srate = sr; resync = true; }
-    void setPattern(int p) { pat = p < 0 ? 0 : (p > 11 ? 11 : p); }
+    void setPattern(int p) { pat = p < 0 ? 0 : (p > kNumPatterns - 1 ? kNumPatterns - 1 : p); }
+    void setTable(const DrumPattern* t) { table = t; }
 
     // called once per block before ticking
     // mode: 0 off, 1 sync to host, 2 always
@@ -161,7 +175,7 @@ public:
     void tick(DrumSynth& d, bool fills) {
         if (!running) return;
         pos += stepsPerSample;
-        const DrumPattern& P = kPatterns[pat];
+        const DrumPattern& P = table[pat];
         while (trigTime(next, P.swing) <= pos) {
             fire(d, next, P, fills);
             ++next;
@@ -175,11 +189,11 @@ private:
     void resyncNext() {
         next = (int64_t)std::ceil(pos - 0.5);
         if (next < 0) next = 0;
-        while (trigTime(next, kPatterns[pat].swing) < pos - 1e-9) ++next;
+        while (trigTime(next, table[pat].swing) < pos - 1e-9) ++next;
         resync = false;
     }
     void fire(DrumSynth& d, int64_t s, const DrumPattern& P, bool fills) {
-        const int len = P.len;
+        const int len = P.len < 1 ? 16 : P.len;
         const int64_t bar = s / len;
         const int st = (int)(s % len);
         lastStep = st;
@@ -201,6 +215,7 @@ private:
 
     double srate = 44100, pos = 0, stepsPerSample = 0;
     int64_t next = 0;
+    const DrumPattern* table = kPatterns;
     int pat = 0, mode = 0, lastStep = -1;
     bool running = false, free = false, resync = true;
 };
