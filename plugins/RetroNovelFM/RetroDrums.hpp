@@ -10,7 +10,7 @@ namespace retrofm {
 class DrumSynth {
 public:
     void setSampleRate(double sr) { srate = sr; for (auto& v : v_) v.active = false; }
-    void setKit(int k) { kit = k < 0 ? 0 : (k > 3 ? 3 : k); }
+    void setKit(int k) { kit = k < 0 ? 0 : (k > 4 ? 4 : k); }
 
     void trigger(int lane, float vel) {
         if (lane < 0 || lane >= kDrumLanes || vel <= 0) return;
@@ -43,21 +43,21 @@ public:
             }
             switch (lane) {
             case dKick: {
-                const double f0 = kit == 1 ? 120 : 170, f1 = kit == 1 ? 44 : 52;
-                const double pt = kit == 1 ? 0.045 : 0.03, at = kit == 1 ? 0.55 : 0.22;
+                const double f0 = kit == 1 ? 120 : (kit == 4 ? 210 : 170), f1 = kit == 1 ? 44 : (kit == 4 ? 48 : 52);
+                const double pt = kit == 1 ? 0.045 : (kit == 4 ? 0.022 : 0.03), at = kit == 1 ? 0.55 : (kit == 4 ? 0.3 : 0.22);
                 const double f = f1 + (f0 - f1) * std::exp(-t / pt);
                 v.ph += f * dt; if (v.ph >= 1) v.ph -= 1;
                 amp = std::exp(-t / at);
                 s = std::sin(6.283185307 * v.ph);
-                if (kit != 1) s += 0.6 * std::exp(-t / 0.004) * noise();   // click
-                s = std::tanh(s * (kit == 2 ? 2.5 : 1.4));
+                if (kit != 1) s += (kit == 4 ? 1.1 : 0.6) * std::exp(-t / 0.004) * noise();   // click
+                s = std::tanh(s * (kit == 2 ? 2.5 : (kit == 4 ? 2.4 : 1.4)));
                 if (amp < 0.0005) v.active = false;
                 break; }
             case dSnare: {
                 const double ft = kit == 1 ? 180 : 210;
                 v.ph += ft * dt; if (v.ph >= 1) v.ph -= 1;
                 const double tone = std::sin(6.283185307 * v.ph) * std::exp(-t / 0.06);
-                const double n = hp(v, noise(), 0.3) * std::exp(-t / (kit == 1 ? 0.18 : 0.13));
+                const double n = hp(v, noise(), 0.3) * std::exp(-t / (kit == 1 ? 0.18 : (kit == 4 ? 0.21 : 0.13))) * (kit == 4 ? 1.25 : 1.0);
                 s = tone * 0.6 + n * 0.9;
                 if (t > 0.9) v.active = false;
                 break; }
@@ -104,6 +104,7 @@ public:
             v.t += dt;
         }
         // 8-bit kit: crush
+        if (kit == 4) out = std::tanh(out * 1.5) * 0.85;   // rock kit: glue saturation
         if (kit == 2) {
             if (++hc >= 3) { hc = 0; held = std::floor(out * 24 + 0.5) / 24; }
             out = held;

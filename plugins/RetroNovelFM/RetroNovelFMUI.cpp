@@ -34,10 +34,13 @@ struct Box {
 
 enum CtlType { ctSelect, ctKnob, ctToggle, ctAction, ctEraTab, ctLoad, ctClearSmp, ctRootDn, ctRootUp,
                ctEditOpen, ctEditClose, ctEditUser, ctEditLen, ctEditClear, ctEditCopy, ctCell,
-               ctIdol, ctLyricPreset, ctLyricEdit, ctLyricRewind };
+               ctIdol, ctLyricPreset, ctLyricEdit, ctLyricRewind, ctLyricRU, ctLyricPaste,
+               ctScenesOpen, ctSceneCard, ctSceneOff, ctScenesClose, ctStoryOpen, ctLesson, ctStoryMenuClose };
 // control groups: 0 = always, 1..3 = only on that era tab (FM / XP / user), 10 = drum editor overlay
-enum CtlGroup { gAlways = 0, gFM = 1, gXP = 2, gUser = 3, gEditor = 10, gVocal = 11, gInst = 12 };
+enum CtlGroup { gAlways = 0, gFM = 1, gXP = 2, gUser = 3, gEditor = 10, gVocal = 11, gInst = 12, gRock = 13, gScenes = 14, gStoryMenu = 15 };
 enum ActionId { aPrev, aNext, aRandom };
+
+static constexpr int kNumLessons = 5;
 
 struct Control {
     CtlType type; int param; float value; Box b; const char* label; int group;
@@ -65,6 +68,9 @@ public:
         if (std::getenv("RETRO_EDITOR")) { fEditor = true; fEditUser = 0; }
         if (const char* e = std::getenv("RETRO_VOCAL")) { fParams[pVocalMode] = 1; fParams[pIdol] = (float)std::atoi(e); fForceVocal = true;
             fLyrics = kLyricPresets[2][1]; parseLyrics(fLyrics.c_str(), fSyl); fParams[pOutSyll] = 3; fParams[pOutMouth] = 0.9f; fParams[pOutVowel] = 0; }
+        if (std::getenv("RETRO_SCENES")) fScenesOpen = true;
+        if (std::getenv("RETRO_STORYMENU")) fStoryMenu = true;
+        if (const char* e = std::getenv("RETRO_STORY")) { fStoryForce = std::atoi(e); }
         if (std::getenv("RETRO_TYPING")) { fEditing = true; fEditBuf = "мы по-ём вме-сте до-ро-га"; }
         if (const char* e = std::getenv("RETRO_EXPORT")) { fExport = true; fExportGirl = std::strcmp(e, "girl") == 0; }
         if (const char* e = std::getenv("RETRO_FRAME")) { const int f = std::atoi(e); fForceBlink = f == 1 ? 1 : 0; fForceMouth = f == 2 ? 1 : 0; }
@@ -120,6 +126,9 @@ protected:
         fT = now();
         save();
         scale(sc, sc);
+       #ifdef RETRO_SCREENSHOT
+        if (fStoryForce >= 0 && fStory < 0) { startLesson(fStoryForce / 10); fStoryStep = fStoryForce % 10; storyEnterStep(); fTypeT = -10; fStoryForce = -1; }
+       #endif
 
         // "Live2D" look target: follow the cursor, otherwise wander softly
         {
@@ -187,6 +196,7 @@ protected:
         drawTextbox(C, inst);
         drawDrumPanel(C);
         if (fEditor) drawEditor(C);
+        drawOverlays();
 
         restore();
     }
@@ -202,8 +212,15 @@ protected:
             if (fDrag >= 0) { editParameter(fCtl[fDrag].param, false); fDrag = -1; return true; }
             return false;
         }
+        // story mode box buttons come first
+        if (fStory >= 0)
+        {
+            if (fStoryNext.hit(px, py)) { storyAdvance(); repaint(); return true; }
+            if (fStoryExit.hit(px, py)) { fStory = -1; repaint(); return true; }
+        }
         bool hitEdit = false;
-        for (int i = 0; i < fCtlCount; ++i) if (fCtl[i].type == ctLyricEdit && visible(fCtl[i]) && fCtl[i].b.hit(px, py)) hitEdit = true;
+        for (int i = 0; i < fCtlCount; ++i)
+            if ((fCtl[i].type == ctLyricEdit || fCtl[i].type == ctLyricRU || fCtl[i].type == ctLyricPaste) && visible(fCtl[i]) && fCtl[i].b.hit(px, py)) hitEdit = true;
         if (fEditing && !hitEdit) commitLyrics();
         for (int i = 0; i < fCtlCount; ++i)
         {
@@ -227,15 +244,25 @@ protected:
                 else if (c.param == 0) commitLyrics();
                 break;
             case ctLyricRewind: setState("lyrics", fLyrics.c_str()); break;
+            case ctLyricRU: fRuLayout = !fRuLayout; if (fEditing) getWindow().focus(); break;
+            case ctLyricPaste: pasteLyrics(); break;
+            case ctScenesOpen: fScenesOpen = true; break;
+            case ctScenesClose: fScenesOpen = false; break;
+            case ctSceneCard: applyScene((int)c.value); fScenesOpen = false; break;
+            case ctSceneOff: setParam(pScene, 0.f); fScenesOpen = false; break;
+            case ctStoryOpen: fStoryMenu = true; fStory = -1; break;
+            case ctStoryMenuClose: fStoryMenu = false; break;
+            case ctLesson: fStoryMenu = false; startLesson((int)c.value); break;
             case ctSelect:
                 if (c.param == pDrumPattern && c.value < kNumPresetPatterns) fLastPreset = (int)c.value;
+                if (c.param == pInstrument && fParams[pScene] > 0.5f) setParam(pScene, 0.f);   // picking an instrument leaves the scene
                 setParam(c.param, c.value);
                 break;
             case ctToggle: setParam(c.param, fParams[c.param] > 0.5f ? 0.f : 1.f); break;
             case ctAction:
             {
-                const int lo = fEraTab == eraPC98 ? 0 : (fEraTab == eraXP ? kFirstXP : kFirstUser);
-                const int cnt = fEraTab == eraPC98 ? kNumFM : (fEraTab == eraXP ? kNumXP : kNumUser);
+                const int lo = fEraTab == eraPC98 ? 0 : (fEraTab == eraXP ? kFirstXP : (fEraTab == eraRock ? kFirstRock : kFirstUser));
+                const int cnt = fEraTab == eraPC98 ? kNumFM : (fEraTab == eraXP ? kNumXP : (fEraTab == eraRock ? kNumRock : kNumUser));
                 int idx = (cur >= lo && cur < lo + cnt) ? cur - lo : 0;
                 if (c.value == aPrev) idx = (idx + cnt - 1) % cnt;
                 else if (c.value == aNext) idx = (idx + 1) % cnt;
@@ -321,7 +348,10 @@ protected:
 
     bool onKeyboard(const KeyboardEvent& ev) override
     {
-        if (!fEditing || !ev.press) return false;
+        if (!ev.press) return fEditing;
+        if ((ev.mod & kModifierControl) && (ev.key == 'v' || ev.key == 'V' || ev.keycode == 0x2F /* 'v' scancode */) && fParams[pVocalMode] > 0.5f)
+        { pasteLyrics(); repaint(); return true; }
+        if (!fEditing) return false;
         if (ev.key == kKeyBackspace) { while (!fEditBuf.empty() && (fEditBuf.back() & 0xC0) == 0x80) fEditBuf.pop_back(); if (!fEditBuf.empty()) fEditBuf.pop_back(); }
         else if (ev.key == kKeyEnter) commitLyrics();
         else if (ev.key == kKeyEscape) fEditing = false;
@@ -332,9 +362,70 @@ protected:
     bool onCharacterInput(const CharacterInputEvent& ev) override
     {
         if (!fEditing) return false;
-        if (ev.character >= 32 && ev.character != 127 && fEditBuf.size() < 900) fEditBuf += ev.string;
+        if (ev.mod & kModifierControl) return true;
+        uint32_t cp = ev.character;
+        // hosts that forward keys (VST) give only the key code; the native window also gives UTF-8 text
+        if (ev.string[0] && (unsigned char)ev.string[0] >= 0x80) { if (fEditBuf.size() < 900) fEditBuf += ev.string; repaint(); return true; }
+        if (cp >= 32 && cp != 127 && fEditBuf.size() < 900)
+        {
+            if (fRuLayout) cp = ruKey(cp);
+            appendUtf8(fEditBuf, cp);
+        }
         repaint();
         return true;
+    }
+
+    // Latin key -> Cyrillic letter on the same key of the ЙЦУКЕН layout
+    static uint32_t ruKey(uint32_t c)
+    {
+        static const char* const lat = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`";
+        static const uint32_t cyr[] = { 0x439,0x446,0x443,0x43A,0x435,0x43D,0x433,0x448,0x449,0x437,0x445,0x44A,
+                                        0x444,0x44B,0x432,0x430,0x43F,0x440,0x43E,0x43B,0x434,0x436,0x44D,
+                                        0x44F,0x447,0x441,0x43C,0x438,0x442,0x44C,0x431,0x44E,0x451 };
+        const bool upper = c >= 'A' && c <= 'Z';
+        const uint32_t lc = upper ? c + 32 : c;
+        static const char* const latUp = "{}:\"<>~";
+        static const uint32_t cyrUp[] = { 0x425, 0x42A, 0x416, 0x42D, 0x411, 0x42E, 0x401 };
+        for (int i = 0; latUp[i]; ++i) if ((uint32_t)(unsigned char)latUp[i] == c) return cyrUp[i];
+        for (int i = 0; lat[i]; ++i)
+            if ((uint32_t)(unsigned char)lat[i] == lc)
+            {
+                uint32_t r = cyr[i];
+                if (upper) r = (r == 0x451) ? 0x401 : r - 32;
+                return r;
+            }
+        return c;
+    }
+    static void appendUtf8(std::string& s, uint32_t cp)
+    {
+        if (cp < 0x80) s += (char)cp;
+        else if (cp < 0x800) { s += (char)(0xC0 | (cp >> 6)); s += (char)(0x80 | (cp & 63)); }
+        else { s += (char)(0xE0 | (cp >> 12)); s += (char)(0x80 | ((cp >> 6) & 63)); s += (char)(0x80 | (cp & 63)); }
+    }
+    void pasteLyrics()
+    {
+        size_t sz = 0;
+        const void* data = getClipboard(sz);
+        if (!data || sz == 0) return;
+        std::string t((const char*)data, sz);
+        for (char& ch : t) if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
+        while (!t.empty() && t.back() == 0) t.pop_back();
+        if (fEditing) { fEditBuf += t; if (fEditBuf.size() > 900) fEditBuf.resize(900); }
+        else { fEditBuf = t; if (fEditBuf.size() > 900) fEditBuf.resize(900); commitLyrics(); }
+    }
+
+    // ------------------------------------------------------------------ scenes
+    void applyScene(int n)
+    {
+        if (n < 1 || n > kNumScenes) return;
+        const ScenePreset& S = kScenes[n - 1];
+        setParam(pVocalMode, 0.f);
+        setParam(pInstrument, (float)S.part[0].inst);
+        setParam(pScene, (float)n);
+        setParam(pDrumMode, (float)S.drumMode); setParam(pDrumPattern, (float)S.drumPattern);
+        setParam(pDrumKit, (float)S.drumKit); setParam(pDrumVolume, S.drumVol);
+        setParam(pReverb, S.reverb); setParam(pChorus, S.chorus); setParam(pLofi, S.lofi); setParam(pBrightness, S.bright);
+        fEraTab = eraOf(S.part[0].inst);
     }
 
     bool onScroll(const ScrollEvent& ev) override
@@ -378,13 +469,16 @@ private:
     bool visible(const Control& c) const
     {
         if (fEditor) return c.group == gEditor;
-        if (c.group == gEditor) return false;
+        if (fScenesOpen) return c.group == gScenes;
+        if (fStoryMenu) return c.group == gStoryMenu;
+        if (c.group == gEditor || c.group == gScenes || c.group == gStoryMenu) return false;
         const bool vocal = fParams[pVocalMode] > 0.5f;
         if (c.group == gVocal) return vocal;
         if (c.group == gInst) return !vocal;
         if (c.group == gFM) return !vocal && fEraTab == eraPC98;
         if (c.group == gXP) return !vocal && fEraTab == eraXP;
         if (c.group == gUser) return !vocal && fEraTab == eraUser;
+        if (c.group == gRock) return !vocal && fEraTab == eraRock;
         return true;
     }
 
@@ -454,9 +548,13 @@ private:
     void buildLayout()
     {
         // era tabs
-        static const char* const tabs[3] = { "PC-98 \xE2\x80\xA2 90s", "WIN XP \xE2\x80\xA2 00s", "MY SAMPLES" };
-        static const float tx[3] = { 24.f, 104.f, 186.f }, tw[3] = { 78.f, 80.f, 68.f };
-        for (int i = 0; i < 3; ++i) addCtl(ctEraTab, pInstrument, (float)i, tx[i], 82.f, tw[i], 22.f, tabs[i], gInst);
+        // era tabs (value = Era id): PC-98, WIN XP, ROCK, MY
+        static const char* const tabs[4] = { "PC-98", "WIN XP", "ROCK \xE2\x9A\xA1", "MY \xE2\x99\xAA" };
+        static const int tabEra[4] = { eraPC98, eraXP, eraRock, eraUser };
+        for (int i = 0; i < 4; ++i) addCtl(ctEraTab, pInstrument, (float)tabEra[i], 24.f + i * 57.f, 82.f, 54.f, 22.f, tabs[i], gInst);
+        // ROCK & battle list
+        for (int i = 0; i < kNumRock; ++i)
+            addCtl(ctSelect, pInstrument, (float)(kFirstRock + i), 26.f + (i % 2) * 117.f, 110.f + (i / 2) * 27.f, 112.f, 23.f, kInstrumentNames[kFirstRock + i], gRock);
         // PC-98 FM list
         for (int i = 0; i < kNumFM; ++i)
             addCtl(ctSelect, pInstrument, (float)i, 26.f + (i % 2) * 117.f, 110.f + (i / 2) * 27.f, 112.f, 23.f, kInstrumentNames[i], gFM);
@@ -491,21 +589,34 @@ private:
         addCtl(ctLyricRewind, 0, 0, 682.f, 506.f, 80.f, 20.f, "\xE2\x9F\xB2 START", gVocal);
         addCtl(ctLyricEdit,   1, 0, 30.f, 474.f, 900.f, 28.f, nullptr, gVocal);   // click on the lyric line = edit
         // top bar: vocal mode switch
-        addCtl(ctToggle, pVocalMode, 0, 470.f, 10.f, 140.f, 26.f, "VOCAL", gAlways);
+        addCtl(ctToggle, pVocalMode, 0, 250.f, 10.f, 92.f, 26.f, "VOCAL", gAlways);
+        addCtl(ctScenesOpen, pScene, 0, 348.f, 10.f, 92.f, 26.f, "SCENES", gAlways);
+        addCtl(ctStoryOpen, 0, 0, 446.f, 10.f, 92.f, 26.f, "STORY", gAlways);
+        addCtl(ctLyricRU,    0, 0, 768.f, 506.f, 52.f, 20.f, "RU", gVocal);
+        addCtl(ctLyricPaste, 0, 0, 824.f, 506.f, 78.f, 20.f, "PASTE", gVocal);
+        // scene browser
+        for (int i = 0; i < kNumScenes; ++i)
+            addCtl(ctSceneCard, pScene, (float)(i + 1), 84.f + (i % 4) * 200.f, 112.f + (i / 4) * 56.f, 194.f, 52.f, kScenes[i].name, gScenes);
+        addCtl(ctSceneOff,    pScene, 0, 610.f, 74.f, 160.f, 26.f, "SCENE OFF", gScenes);
+        addCtl(ctScenesClose, 0, 0, 846.f, 72.f, 28.f, 28.f, "\xE2\x9C\x95", gScenes);
+        // story menu
+        for (int i = 0; i < kNumLessons; ++i)
+            addCtl(ctLesson, 0, (float)i, 150.f, 118.f + i * 66.f, 660.f, 60.f, nullptr, gStoryMenu);
+        addCtl(ctStoryMenuClose, 0, 0, 786.f, 72.f, 28.f, 28.f, "\xE2\x9C\x95", gStoryMenu);
         // top bar actions
         addCtl(ctAction, pInstrument, aPrev,   640.f, 10.f, 40.f, 26.f, "\xE2\x97\x80");
         addCtl(ctAction, pInstrument, aNext,   684.f, 10.f, 40.f, 26.f, "\xE2\x96\xB6");
         addCtl(ctAction, pInstrument, aRandom, 728.f, 10.f, 104.f, 26.f, "RANDOM");
         // drums
         static const char* const modes[3] = { "OFF", "SYNC", "ALWAYS" };
-        static const char* const kits[4] = { "PC-98", "808", "8-BIT", "LIVE" };
-        for (int i = 0; i < 3; ++i) addCtl(ctSelect, pDrumMode, (float)i, 110.f + i * 62.f, 552.f, 58.f, 24.f, modes[i]);
-        for (int i = 0; i < 4; ++i) addCtl(ctSelect, pDrumKit, (float)i, 304.f + i * 64.f, 552.f, 60.f, 24.f, kits[i]);
-        addCtl(ctToggle, pDrumFill, 0, 566.f, 552.f, 64.f, 24.f, "FILLS");
-        addCtl(ctEditOpen, pDrumPattern, 0, 636.f, 552.f, 74.f, 24.f, "EDIT \xE2\x9C\x8E");
+        static const char* const kits[5] = { "PC-98", "808", "8-BIT", "LIVE", "ROCK" };
+        for (int i = 0; i < 3; ++i) addCtl(ctSelect, pDrumMode, (float)i, 100.f + i * 56.f, 552.f, 52.f, 24.f, modes[i]);
+        for (int i = 0; i < 5; ++i) addCtl(ctSelect, pDrumKit, (float)i, 272.f + i * 54.f, 552.f, 51.f, 24.f, kits[i]);
+        addCtl(ctToggle, pDrumFill, 0, 546.f, 552.f, 60.f, 24.f, "FILLS");
+        addCtl(ctEditOpen, pDrumPattern, 0, 610.f, 552.f, 66.f, 24.f, "EDIT \xE2\x9C\x8E");
         addCtl(ctKnob, pDrumVolume, 0, 868.f, 540.f, 72.f, 104.f, "DRUM VOL");
         for (int i = 0; i < kNumPatterns; ++i)
-            addCtl(ctSelect, pDrumPattern, (float)i, 26.f + (i % 8) * 69.f, 586.f + (i / 8) * 28.f, 65.f, 23.f,
+            addCtl(ctSelect, pDrumPattern, (float)i, 24.f + (i % 10) * 57.f, 586.f + (i / 10) * 28.f, 55.f, 23.f,
                    i < kNumPresetPatterns ? kPatterns[i].name : kUserPatternNames[i - kNumPresetPatterns]);
         // drum editor overlay
         addCtl(ctEditClose, 0, 0, 786.f, 68.f, 26.f, 26.f, "\xE2\x9C\x95", gEditor);
@@ -557,6 +668,279 @@ private:
     }
 
     // ================================================================== scene
+
+    // ================================================================== Story Mode (interactive lessons)
+    enum CondKind { ckNext, ckParamEq, ckParamGE, ckChanged, ckActivity, ckEraTab, ckEditorOpen, ckEditorClosed, ckScenesOpen, ckLyricsSakura };
+    struct StoryStep { int heroine; const char* text; int tType, tParam; float tValue; int ck, cParam; float cValue; };
+    struct Lesson { const char* title; const char* desc; int heroine; const StoryStep* steps; int count; };
+
+    static const Lesson* lessons()
+    {
+        // heroine: 0..8 = kChars, 100+ = kIdols ; tType -1 = no target ; tValue -1 = any value
+        static const StoryStep l1[] = {
+            {0, "Привет! Я Хикари. Покажу, как тут всё устроено, — пара минут, не больше. Жми «Далее».", -1, 0, 0, ckNext, 0, 0},
+            {0, "Слева вкладки эпох: PC-98 — 90-е, WIN XP — 2000-е, ROCK — битвы, MY — твои сэмплы. Открой PC-98.", ctEraTab, pInstrument, (float)eraPC98, ckEraTab, 0, (float)eraPC98},
+            {0, "Выбери «FM E.Piano» — это мой инструмент!", ctSelect, pInstrument, 0, ckParamEq, pInstrument, 0},
+            {0, "Сыграй пару нот: MIDI-клавиатурой или в piano roll твоей DAW. Я подожду~", -1, 0, 0, ckActivity, 0, 0},
+            {0, "Ручка BRIGHT — звонкость. Потяни её мышкой вверх или вниз.", ctKnob, pBrightness, -1, ckChanged, pBrightness, 0},
+            {0, "REVERB — эхо зала. Чуть больше — и звук как в школьном актовом зале.", ctKnob, pReverb, -1, ckChanged, pReverb, 0},
+            {0, "LO-FI делает звук хрустящим, как из старого компьютера. Попробуй!", ctKnob, pLofi, -1, ckChanged, pLofi, 0},
+            {0, "Подсказки: правый клик по ручке — сброс, колесо мыши — точная настройка, Shift — медленнее. Урок пройден!", -1, 0, 0, ckNext, 0, 0},
+        };
+        static const StoryStep l2[] = {
+            {4, "Я Аканэ! Соберём трек в духе 90-х. В DAW сделай три дорожки с этим плагином: мелодия, аккорды и бас.", -1, 0, 0, ckNext, 0, 0},
+            {4, "Это будет дорожка мелодии. Открой вкладку PC-98.", ctEraTab, pInstrument, (float)eraPC98, ckEraTab, 0, (float)eraPC98},
+            {4, "Выбери «PC-98 Lead» — квадратная волна, как на старых компьютерах.", ctSelect, pInstrument, 6, ckParamEq, pInstrument, 6},
+            {4, "Добавь LO-FI примерно на треть — так звучали звуковые чипы.", ctKnob, pLofi, -1, ckParamGE, pLofi, 0.25f},
+            {4, "Немного CHORUS — для ширины звука.", ctKnob, pChorus, -1, ckChanged, pChorus, 0},
+            {4, "Барабаны: включи SYNC — они будут играть вместе с DAW.", ctSelect, pDrumMode, 1, ckParamEq, pDrumMode, 1},
+            {4, "Ритм «Town Theme» — типичный для RPG 90-х.", ctSelect, pDrumPattern, 2, ckParamEq, pDrumPattern, 2},
+            {4, "Кит PC-98 — FM-барабаны той эпохи.", ctSelect, pDrumKit, 0, ckParamEq, pDrumKit, 0},
+            {4, "На второй дорожке выбери «FM E.Piano» для аккордов, на третьей — «Synth Bass». Мелодию строй на нотах до-ре-ми-соль-ля — это пентатоника, звук сразу «японский».", -1, 0, 0, ckNext, 0, 0},
+            {4, "Нажми Play в DAW! Все настройки сохранятся вместе с проектом. Вперёд, к приключениям!", -1, 0, 0, ckNext, 0, 0},
+        };
+        static const StoryStep l3[] = {
+            {5, "Рин на связи. Сцены — это готовые наборы: инструменты, барабаны и эффекты для разных ситуаций.", -1, 0, 0, ckNext, 0, 0},
+            {5, "Открой SCENES наверху.", ctScenesOpen, pScene, -1, ckScenesOpen, 0, 0},
+            {5, "Выбери «Битва с боссом».", ctSceneCard, pScene, 16, ckParamEq, pScene, 16},
+            {5, "Играй! Ниже C3 (левая рука) — бас-гитара, выше — гитара и струнные вместе. Барабаны уже на SYNC — нажми Play в DAW.", -1, 0, 0, ckActivity, 0, 0},
+            {5, "Во вкладке ROCK есть ритмичные инструменты. Открой её.", ctEraTab, pInstrument, (float)eraRock, ckEraTab, 0, (float)eraRock},
+            {5, "Выбери «Chug 16th» и зажми аккорд — гитара сама сыграет шестнадцатыми в темп песни.", ctSelect, pInstrument, (float)(kFirstRock + 5), ckParamEq, pInstrument, (float)(kFirstRock + 5)},
+            {5, "Ещё попробуй «Battle Arp» и «Str Ostinato». Для кульминации — сцены «Кульминация» и «Финальный босс»!", -1, 0, 0, ckNext, 0, 0},
+        };
+        static const StoryStep l4[] = {
+            {100, "Привет, я Сора! Включи VOCAL наверху.", ctToggle, pVocalMode, -1, ckParamEq, pVocalMode, 1},
+            {100, "Выбери меня в списке айдолов слева.", ctIdol, pIdol, 0, ckParamEq, pIdol, 0},
+            {100, "Нажми «Sakura» — это готовый текст.", ctLyricPreset, 0, 2, ckLyricsSakura, 0, 0},
+            {100, "Сыграй мелодию: каждая нота — следующий слог. Перекрывай ноты — получится плавное легато.", -1, 0, 0, ckActivity, 0, 0},
+            {100, "Свой текст: EDIT ✎ и набирай слоги через пробел. RU — русская раскладка, PASTE (или Ctrl+V) — вставить скопированный текст.", ctLyricEdit, 0, -1, ckNext, 0, 0},
+            {100, "Ручка BREATH добавляет придыхание. Попробуй!", ctKnob, pVBreath, -1, ckChanged, pVBreath, 0},
+            {100, "Готово! Текст начинается сначала каждый раз, когда ты жмёшь Play в DAW.", -1, 0, 0, ckNext, 0, 0},
+        };
+        static const StoryStep l5[] = {
+            {5, "Сделаем свой ритм! Нажми EDIT ✎ у барабанов.", ctEditOpen, pDrumPattern, -1, ckEditorOpen, 0, 0},
+            {5, "Кликай по клеткам: обычный удар → акцент (!) → тихий (·). Правый клик — стереть. Сделай пару ударов и жми «Далее».", -1, 0, 0, ckNext, 0, 0},
+            {5, "COPY копирует выбранный готовый ритм — удобно начать с него и переделать.", ctEditCopy, 0, -1, ckNext, 0, 0},
+            {5, "Закрой редактор. Твой паттерн уже выбран (User 1–4) и сохранится в проекте.", ctEditClose, 0, -1, ckEditorClosed, 0, 0},
+        };
+        static const Lesson L[] = {
+            {"Первые шаги",        "эпохи, инструменты, главные ручки",     0, l1, (int)(sizeof(l1) / sizeof(l1[0]))},
+            {"Трек в стиле 90-х",  "мелодия PC-98, lo-fi, барабаны, советы", 4, l2, (int)(sizeof(l2) / sizeof(l2[0]))},
+            {"Сцены и битвы",      "готовые сцены, рок, ритмичные партии",   5, l3, (int)(sizeof(l3) / sizeof(l3[0]))},
+            {"Поющие айдолы",      "вокал, тексты, голос",                   100, l4, (int)(sizeof(l4) / sizeof(l4[0]))},
+            {"Свои барабаны",      "редактор паттернов",                     5, l5, (int)(sizeof(l5) / sizeof(l5[0]))},
+        };
+        return L;
+    }
+
+    void startLesson(int n)
+    {
+        fStory = n; fStoryStep = 0; storyEnterStep();
+    }
+    void storyEnterStep()
+    {
+        const StoryStep& S = lessons()[fStory].steps[fStoryStep];
+        fStoryStartVal = S.cParam >= 0 && S.cParam < kParamCount ? fParams[S.cParam] : 0.f;
+        fStoryT = fT; fStoryDoneT = -1;
+        fTypeT = fT;
+    }
+    void storyAdvance()
+    {
+        if (fStory < 0) return;
+        if (++fStoryStep >= lessons()[fStory].count) { fStory = -1; return; }
+        storyEnterStep();
+    }
+    bool storyCondition(const StoryStep& S)
+    {
+        switch (S.ck)
+        {
+        case ckParamEq:  return std::fabs(fParams[S.cParam] - S.cValue) < 0.01f;
+        case ckParamGE:  return fParams[S.cParam] >= S.cValue;
+        case ckChanged:  return std::fabs(fParams[S.cParam] - fStoryStartVal) > 0.02f * (kParams[S.cParam].max - kParams[S.cParam].min);
+        case ckActivity: return fParams[pOutActivity] > 0.08f || fParams[pOutMouth] > 0.1f;
+        case ckEraTab:   return fEraTab == (int)S.cValue;
+        case ckEditorOpen: return fEditor;
+        case ckEditorClosed: return !fEditor;
+        case ckScenesOpen: return fScenesOpen;
+        case ckLyricsSakura: return fLyrics.find("sa ku ra") != std::string::npos;
+        default: return false;
+        }
+    }
+    const Control* findCtl(int type, int param, float value) const
+    {
+        for (int i = 0; i < fCtlCount; ++i)
+        {
+            const Control& c = fCtl[i];
+            if (c.type != type) continue;
+            if (type != ctEraTab && type != ctLyricEdit && c.param != param) continue;
+            if (value >= 0 && std::fabs(c.value - value) > 0.01f) continue;
+            if (!visible(c)) continue;
+            return &c;
+        }
+        return nullptr;
+    }
+
+    void drawOverlays()
+    {
+        if (fScenesOpen) drawSceneBrowser();
+        if (fStoryMenu) drawStoryMenu();
+        if (fStory >= 0) drawStory();
+    }
+
+    void drawSceneBrowser()
+    {
+        beginPath(); rect(0, 0, kW, kH); fillColor(Color(16, 8, 36, 0.55f)); fill();
+        fPixelUI = false;
+        glassPanel(64, 60, 832, 470, 0xffb347, 16.f);
+        fillColor(hexc(0xff8a3a)); drawFlower(86, 86, 9);
+        label(102, 92, "SCENES", 17.f, Color(80, 40, 60), ALIGN_LEFT | ALIGN_BASELINE);
+        label(190, 92, "готовые наборы для ситуаций: до 3 инструментов + барабаны + эффекты", 10.5f, Color(130, 90, 110), ALIGN_LEFT | ALIGN_BASELINE);
+        const int cur = (int)std::lround(fParams[pScene]);
+        for (int i = 0; i < fCtlCount; ++i)
+        {
+            const Control& c = fCtl[i];
+            if (c.group != gScenes) continue;
+            const bool hv = hover(c.b);
+            if (c.type == ctSceneCard)
+            {
+                const ScenePreset& S = kScenes[(int)c.value - 1];
+                const CharacterDef& H = kChars[kFlavor[S.part[0].inst].ch];
+                const bool sel = (int)c.value == cur;
+                beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 10);
+                if (sel) fillPaint(linearGradient(c.b.x, 0, c.b.x + c.b.w, 0, hexc(H.accent), mixc(H.accent, 0x8a5cff, 0.5f)));
+                else fillColor(hv ? Color(255, 236, 246) : Color(255, 255, 255, 0.88f));
+                fill(); strokeWidth(1.f); strokeColor(hexc(H.accent, 0.7f)); stroke();
+                beginPath(); roundedRect(c.b.x + 6, c.b.y + 6, 6, c.b.h - 12, 3); fillColor(hexc(H.accent)); fill();
+                label(c.b.x + 18, c.b.y + 20, S.name, 12.f, sel ? Color(255, 255, 255) : Color(60, 40, 70), ALIGN_LEFT | ALIGN_BASELINE);
+                label(c.b.x + 18, c.b.y + 36, S.desc, 9.f, sel ? Color(255, 255, 255, 0.9f) : Color(120, 90, 130), ALIGN_LEFT | ALIGN_BASELINE);
+                label(c.b.x + c.b.w - 8, c.b.y + 46, S.category, 8.f, sel ? Color(255, 255, 255, 0.8f) : hexc(H.accent), ALIGN_RIGHT | ALIGN_BASELINE);
+            }
+            else if (c.type == ctSceneOff)
+            {
+                pill(c.b, cur == 0, hv, 0xff8a3a);
+                label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, "SCENE OFF", 11.f, cur == 0 ? Color(255, 255, 255) : Color(80, 40, 60), ALIGN_CENTER | ALIGN_MIDDLE);
+            }
+            else if (c.type == ctScenesClose)
+            {
+                beginPath(); circle(c.b.x + 14, c.b.y + 14, 13); fillColor(hv ? Color(255, 120, 160) : Color(230, 180, 200)); fill();
+                label(c.b.x + 14, c.b.y + 15, c.label, 14.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
+            }
+        }
+        label(480, 520, "левая рука (ниже C3) обычно играет бас, правая — мелодию со слоями  •  барабаны включаются в режиме SYNC", 10.f, Color(120, 90, 130), ALIGN_CENTER | ALIGN_BASELINE);
+    }
+
+    const CharacterDef& storyHeroine(int h) const { return h >= 100 ? kIdols[h - 100] : kChars[h]; }
+
+    void drawPortrait(const CharacterDef& H, float x, float y, float w, float h)
+    {
+        save();
+        scissor(x, y, w, h);
+        beginPath(); roundedRect(x, y, w, h, 10);
+        fillPaint(linearGradient(0, y, 0, y + h, hexc(H.skyTop), hexc(H.skyBottom))); fill();
+        const float oldU = fHeroU, oldY = fHeroY; const bool oldIdol = fDrawingIdol;
+        fHeroU = h * 0.32f; fHeroY = y + h * 0.56f; fDrawingIdol = false;
+        drawHeroine(H, x + w / 2, 1.f);
+        fHeroU = oldU; fHeroY = oldY; fDrawingIdol = oldIdol;
+        resetScissor();
+        restore();
+        beginPath(); roundedRect(x, y, w, h, 10); strokeWidth(2.f); strokeColor(hexc(H.accent)); stroke();
+    }
+
+    void drawStoryMenu()
+    {
+        beginPath(); rect(0, 0, kW, kH); fillColor(Color(16, 8, 36, 0.55f)); fill();
+        fPixelUI = false;
+        glassPanel(136, 60, 688, 470, 0xff5fa8, 16.f);
+        fillColor(hexc(0xff5fa8)); drawFlower(158, 86, 9);
+        label(174, 92, "STORY MODE", 17.f, Color(80, 40, 80), ALIGN_LEFT | ALIGN_BASELINE);
+        label(310, 92, "мастер-класс: героини объясняют, как всё работает", 10.5f, Color(130, 90, 130), ALIGN_LEFT | ALIGN_BASELINE);
+        for (int i = 0; i < fCtlCount; ++i)
+        {
+            const Control& c = fCtl[i];
+            if (c.group != gStoryMenu) continue;
+            const bool hv = hover(c.b);
+            if (c.type == ctLesson)
+            {
+                const Lesson& L = lessons()[(int)c.value];
+                const CharacterDef& H = storyHeroine(L.heroine);
+                beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 12);
+                fillColor(hv ? Color(255, 236, 246) : Color(255, 255, 255, 0.9f)); fill();
+                strokeWidth(1.5f); strokeColor(hexc(H.accent, 0.8f)); stroke();
+                drawPortrait(H, c.b.x + 6, c.b.y + 5, 70, c.b.h - 10);
+                char t[96]; std::snprintf(t, sizeof(t), "Урок %d. %s", (int)c.value + 1, L.title);
+                label(c.b.x + 92, c.b.y + 25, t, 15.f, Color(60, 40, 70), ALIGN_LEFT | ALIGN_BASELINE);
+                char d[160]; std::snprintf(d, sizeof(d), "%s  \xE2\x80\xA2  ведёт %s  \xE2\x80\xA2  %d шагов", L.desc, H.name, L.count);
+                label(c.b.x + 92, c.b.y + 45, d, 10.5f, Color(130, 100, 140), ALIGN_LEFT | ALIGN_BASELINE);
+                label(c.b.x + c.b.w - 18, c.b.y + c.b.h / 2 + 5, "\xE2\x96\xB6", 16.f, hexc(H.accent), ALIGN_RIGHT | ALIGN_BASELINE);
+            }
+            else
+            {
+                beginPath(); circle(c.b.x + 14, c.b.y + 14, 13); fillColor(hv ? Color(255, 120, 160) : Color(230, 180, 200)); fill();
+                label(c.b.x + 14, c.b.y + 15, c.label, 14.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
+            }
+        }
+    }
+
+    void drawStory()
+    {
+        const Lesson& L = lessons()[fStory];
+        const StoryStep& S = L.steps[fStoryStep];
+        const CharacterDef& H = storyHeroine(S.heroine);
+        fPixelUI = false;
+        // condition check -> short "great!" then next step
+        const bool done = S.ck != ckNext && storyCondition(S);
+        if (done && fStoryDoneT < 0) fStoryDoneT = fT;
+        if (fStoryDoneT >= 0 && fT - fStoryDoneT > 0.9f) { storyAdvance(); if (fStory < 0) return; }
+        const StoryStep& S2 = lessons()[fStory].steps[fStoryStep];
+        // spotlight on the target control
+        const Control* tc = S2.tType >= 0 ? findCtl(S2.tType, S2.tParam, S2.tValue) : nullptr;
+        Box hb; bool hasT = false;
+        if (tc) { hb = tc->b; hasT = true; }
+        if (hasT)
+        {
+            const float pad = 6;
+            beginPath(); rect(0, 0, kW, kH);
+            roundedRect(hb.x - pad, hb.y - pad, hb.w + pad * 2, hb.h + pad * 2, 10); pathWinding(CW);
+            fillColor(Color(10, 6, 26, 0.45f)); fill();
+            const float pulse = 0.5f + 0.5f * std::sin(fT * 6.f);
+            beginPath(); roundedRect(hb.x - pad, hb.y - pad, hb.w + pad * 2, hb.h + pad * 2, 10);
+            strokeWidth(3.f + pulse * 2.f); strokeColor(hexc(H.accent, 0.6f + 0.4f * pulse)); stroke();
+        }
+        // dialogue box: above or below the target so it never covers it
+        const float bw = 600, bh = 128;
+        float by = 300;
+        if (hasT && hb.y > 250) by = 70;
+        const float bx = 180;
+        beginPath(); roundedRect(bx, by, bw, bh, 14);
+        fillPaint(linearGradient(0, by, 0, by + bh, Color(26, 18, 56, 0.96f), Color(52, 26, 84, 0.96f))); fill();
+        strokeWidth(2.f); strokeColor(hexc(H.accent)); stroke();
+        drawPortrait(H, bx + 10, by + 10, 96, bh - 20);
+        char hdr[128]; std::snprintf(hdr, sizeof(hdr), "%s  \xE2\x80\xA2  %s  (%d/%d)", H.name, L.title, fStoryStep + 1, L.count);
+        label(bx + 118, by + 26, hdr, 13.f, hexc(H.accent), ALIGN_LEFT | ALIGN_BASELINE);
+        const int total = utf8len(S2.text), shown = std::min(total, (int)((fT - fTypeT) * 45.f));
+        fontFace(NANOVG_DEJAVU_SANS_TTF); fontSize(14.5f); textAlign(ALIGN_LEFT | ALIGN_TOP);
+        fillColor(Color(255, 255, 255)); textBox(bx + 118, by + 36, bw - 134, S2.text, utf8advance(S2.text, shown));
+        // buttons
+        fStoryNext.x = bx + bw - 128; fStoryNext.y = by + bh - 32; fStoryNext.w = 116; fStoryNext.h = 24;
+        fStoryExit.x = bx + bw - 34; fStoryExit.y = by + 6; fStoryExit.w = 26; fStoryExit.h = 22;
+        const bool waiting = S2.ck != ckNext && fStoryDoneT < 0;
+        beginPath(); roundedRect(fStoryNext.x, fStoryNext.y, fStoryNext.w, fStoryNext.h, 12);
+        fillColor(waiting ? Color(255, 255, 255, hover(fStoryNext) ? 0.25f : 0.12f) : hexc(H.accent, hover(fStoryNext) ? 1.f : 0.85f)); fill();
+        const bool last = fStoryStep + 1 >= L.count;
+        label(fStoryNext.x + fStoryNext.w / 2, fStoryNext.y + 13, fStoryDoneT >= 0 ? "Отлично! \xE2\x9C\x93" : (waiting ? "пропустить \xE2\x96\xB7" : (last ? "Готово \xE2\x9C\x93" : "Далее \xE2\x96\xB6")), 11.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
+        if (waiting) label(bx + 118, by + bh - 16, "жду, пока ты сделаешь это \xE2\x86\x92", 10.f, Color(255, 255, 255, 0.55f + 0.3f * std::sin(fT * 4.f)), ALIGN_LEFT | ALIGN_BASELINE);
+        label(fStoryExit.x + 13, fStoryExit.y + 12, "\xE2\x9C\x95", 13.f, Color(255, 255, 255, hover(fStoryExit) ? 1.f : 0.6f), ALIGN_CENTER | ALIGN_MIDDLE);
+        // arrow from the box to the target
+        if (hasT)
+        {
+            const float ax = hb.x + hb.w / 2, ay = by > hb.y ? hb.y + hb.h + 12 : hb.y - 12;
+            const float bob = std::sin(fT * 5.f) * 4.f;
+            const float dir = by > hb.y ? 1.f : -1.f;
+            beginPath(); moveTo(ax, ay + bob * dir); lineTo(ax - 10, ay + dir * 16 + bob * dir); lineTo(ax + 10, ay + dir * 16 + bob * dir); closePath();
+            fillColor(hexc(H.accent)); fill();
+        }
+    }
+
     // ================================================================== vocal stage
     void drawStage(const CharacterDef& I)
     {
@@ -569,15 +953,15 @@ private:
         for (int lvl = 0; lvl < 4; ++lvl)
         {
             beginPath();
-            for (int gy = 0; gy < 26; ++gy)
-                for (int gx = 0; gx < 66; ++gx)
+            for (int gy = 0; gy < 13; ++gy)
+                for (int gx = 0; gx < 33; ++gx)
                 {
-                    const float u = gx / 66.f, v = gy / 26.f;
+                    const float u = gx / 33.f, v = gy / 13.f;
                     float w = 0.3f + 0.3f * std::sin(u * 9.f + fT * 1.7f) * std::cos(v * 6.f - fT * 1.1f);
-                    const float bar = std::fabs(std::sin(gx * 0.37f + fT * 2.f)) * (0.25f + 0.55f * sing) + beat * 0.25f;
+                    const float bar = std::fabs(std::sin(gx * 0.74f + fT * 2.f)) * (0.25f + 0.55f * sing) + beat * 0.25f;
                     if (1.f - v < bar) w = std::fmax(w, 1.f - v > bar - 0.05f ? 0.95f : 0.7f);
                     const int L = (int)(w * 4.f);
-                    if (std::min(3, L) == lvl) rect(152 + gx * 10.f, 54 + gy * 10.f, 7, 7);
+                    if (std::min(3, L) == lvl) rect(153 + gx * 20.f, 55 + gy * 20.f, 15, 15);
                 }
             static const float al[4] = { 0.06f, 0.2f, 0.55f, 0.95f };
             fillColor(lvl == 3 ? mixc(I.accent, 0xffffff, 0.6f) : hexc(I.accent, al[lvl])); fill();
@@ -657,6 +1041,7 @@ private:
         drawLyricsBox(I);
         drawDrumPanel(I);
         if (fEditor) drawEditor(I);
+        drawOverlays();
         (void)inst;
     }
 
@@ -705,7 +1090,20 @@ private:
             // show the tail of the text so the caret stays visible
             const char* tx = fEditBuf.c_str();
             Rectangle<float> bnd;
-            while (*tx && textBounds(0, 0, tx, nullptr, bnd) > w - 70) { ++tx; while ((*tx & 0xC0) == 0x80) ++tx; }
+            if (textBounds(0, 0, tx, nullptr, bnd) > w - 70)
+            {
+                // binary search the first byte offset whose tail fits
+                size_t lo = 0, hi = fEditBuf.size();
+                while (lo < hi)
+                {
+                    size_t mid = (lo + hi) / 2;
+                    while (mid < fEditBuf.size() && (fEditBuf[mid] & 0xC0) == 0x80) ++mid;
+                    if (mid >= hi) { hi = mid; break; }
+                    if (textBounds(0, 0, fEditBuf.c_str() + mid, nullptr, bnd) > w - 70) lo = mid + 1; else hi = mid;
+                }
+                while (hi < fEditBuf.size() && (fEditBuf[hi] & 0xC0) == 0x80) ++hi;
+                tx = fEditBuf.c_str() + hi;
+            }
             fillColor(Color(255, 255, 255));
             const float ex = text(x + 22, y + 38, tx, nullptr);
             if (std::fmod(fT, 1.f) < 0.55f) { beginPath(); rect(ex + 2, y + 21, 2, 21); fillColor(hexc(I.accent)); fill(); }
@@ -737,12 +1135,15 @@ private:
         for (int i = 0; i < fCtlCount; ++i)
         {
             const Control& c = fCtl[i];
-            if (c.group != gVocal || c.b.h > 24.f || (c.type != ctLyricPreset && c.type != ctLyricEdit && c.type != ctLyricRewind)) continue;
-            const bool sel = c.type == ctLyricEdit && fEditing;
+            if (c.group != gVocal || c.b.h > 24.f || (c.type != ctLyricPreset && c.type != ctLyricEdit && c.type != ctLyricRewind && c.type != ctLyricRU && c.type != ctLyricPaste)) continue;
+            const bool sel = (c.type == ctLyricEdit && fEditing) || (c.type == ctLyricRU && fRuLayout);
             beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 10);
             fillColor(sel ? hexc(I.accent) : (hover(c.b) ? Color(255, 255, 255, 0.3f) : Color(255, 255, 255, 0.14f))); fill();
             strokeWidth(1.f); strokeColor(hexc(I.accent, 0.8f)); stroke();
-            label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, sel ? "OK \xE2\x86\xB5" : c.label, 10.5f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
+            const char* t = c.label;
+            if (c.type == ctLyricEdit && fEditing) t = "OK \xE2\x86\xB5";
+            if (c.type == ctLyricRU) t = fRuLayout ? "RU" : "EN";
+            label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, t, 10.5f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
         }
     }
 
@@ -1888,12 +2289,23 @@ private:
         {
             const int ci = clampi((int)std::lround(fParams[pInstrument]), 0, kNumInstruments - 1);
             static const char* const eras[3] = { "\xE2\x99\xAA PC-98 / 90s FM", "\xE2\x99\xAA Windows XP / 2000s VN", "\xE2\x99\xAA My samples" };
-            label(250, 30, fParams[pVocalMode] > 0.5f ? "\xE2\x99\xAA Vocal stage" : eras[eraOf(ci)], 13.f, hexc(C.accent), ALIGN_LEFT | ALIGN_BASELINE);
+            (void)ci; (void)eras;
         }
 
         for (int i = 0; i < fCtlCount; ++i)
         {
             const Control& c = fCtl[i];
+            if (c.type == ctScenesOpen || c.type == ctStoryOpen)
+            {
+                const bool on = c.type == ctScenesOpen ? fParams[pScene] > 0.5f : fStory >= 0, hv = hover(c.b);
+                beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 13);
+                if (on) fillPaint(linearGradient(c.b.x, 0, c.b.x + c.b.w, 0, hexc(0xffb347), hexc(0xff5fa8)));
+                else fillColor(hv ? Color(255, 230, 242) : Color(255, 255, 255, 0.9f));
+                fill(); strokeWidth(1.5f); strokeColor(on ? Color(255, 255, 255) : hexc(C.accent, 0.8f)); stroke();
+                const char* t = c.type == ctScenesOpen ? "\xE2\x9C\xA6 SCENES" : "\xE2\x98\x85 STORY";
+                label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, t, 12.f, on ? Color(255, 255, 255) : hexc(C.accent), ALIGN_CENTER | ALIGN_MIDDLE);
+                continue;
+            }
             if (c.type == ctToggle && c.param == pVocalMode)
             {
                 const bool on = fParams[pVocalMode] > 0.5f, hv = hover(c.b);
@@ -1901,7 +2313,7 @@ private:
                 if (on) fillPaint(linearGradient(c.b.x, 0, c.b.x + c.b.w, 0, hexc(0xff5fa8), hexc(0x46a8ff)));
                 else fillColor(hv ? Color(255, 230, 242) : Color(255, 255, 255, 0.9f));
                 fill(); strokeWidth(1.5f); strokeColor(on ? Color(255, 255, 255) : hexc(C.accent, 0.8f)); stroke();
-                label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, on ? "\xE2\x99\xAB VOCAL ON" : "\xE2\x99\xAA VOCAL", 13.f, on ? Color(255, 255, 255) : hexc(C.accent), ALIGN_CENTER | ALIGN_MIDDLE);
+                label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, on ? "\xE2\x99\xAB VOCAL" : "\xE2\x99\xAA VOCAL", 12.f, on ? Color(255, 255, 255) : hexc(C.accent), ALIGN_CENTER | ALIGN_MIDDLE);
                 continue;
             }
             if (c.type != ctAction) continue;
@@ -1912,7 +2324,7 @@ private:
             strokeWidth(1.5f); strokeColor(Color(255, 255, 255, 0.9f)); stroke();
             label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, c.label, 13.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
         }
-        label(940, 30, "v5.0", 11.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
+        label(940, 30, "v6.0", 11.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
     }
 
     void pill(const Box& b, bool sel, bool hv, uint32_t accent, float r = 11.f)
@@ -1941,7 +2353,7 @@ private:
                 if (eraOf(cur) == (int)c.value && !sel) { beginPath(); circle(c.b.x + c.b.w - 6, c.b.y + 5, 3); fillColor(hexc(0xff4f8b)); fill(); }
                 continue;
             }
-            if (!visible(c) || (c.group != gFM && c.group != gXP && c.group != gUser)) continue;
+            if (!visible(c) || (c.group != gFM && c.group != gXP && c.group != gUser && c.group != gRock)) continue;
             if (c.type == ctSelect)
             {
                 const int idx = (int)c.value;
@@ -2044,7 +2456,11 @@ private:
         strokeWidth(2.f); strokeColor(Color(255, 255, 255)); stroke();
         outlinedLabel(x + 32, y + 3, nm, 17.f, Color(255, 255, 255), hexc(C.accent, 0.6f), ALIGN_LEFT | ALIGN_BASELINE, 1.2f);
         char role[96];
-        std::snprintf(role, sizeof(role), "%s \xE2\x80\xA2 %s", C.role, kInstrumentNames[inst]);
+        {
+            const int sc = (int)std::lround(fParams[pScene]);
+            if (sc > 0 && sc <= kNumScenes) std::snprintf(role, sizeof(role), "\xE2\x9C\xA6 %s: %s", kScenes[sc - 1].name, kScenes[sc - 1].desc);
+            else std::snprintf(role, sizeof(role), "%s \xE2\x80\xA2 %s", C.role, kInstrumentNames[inst]);
+        }
         label(x + w - 22, y + 24, role, 11.5f, hexc(C.accent, 0.95f), ALIGN_RIGHT | ALIGN_BASELINE);
 
         // typewriter text (UTF-8 aware)
@@ -2088,7 +2504,7 @@ private:
             char buf[48];
             if (c.type == ctToggle) std::snprintf(buf, sizeof(buf), "%s %s", sel ? "\xE2\x9C\x93" : "\xE2\x97\x8B", c.label);
             else std::snprintf(buf, sizeof(buf), "%s", c.label);
-            label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, buf, c.param == pDrumPattern && c.type == ctSelect ? 9.5f : 10.5f,
+            label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, buf, c.param == pDrumPattern && c.type == ctSelect ? 8.5f : 10.f,
                   sel ? Color(255, 255, 255) : (isUser ? Color(90, 50, 150) : Color(80, 50, 90)), ALIGN_CENTER | ALIGN_MIDDLE);
         }
 
@@ -2119,7 +2535,7 @@ private:
             }
         }
         const char* hint = mode == 0 ? "Drums off: choose SYNC or ALWAYS" : (mode == 1 ? "Plays when the DAW is playing" : "Plays all the time");
-        label(716, 569, hint, 9.5f, Color(120, 90, 130), ALIGN_LEFT | ALIGN_BASELINE);
+        label(684, 569, hint, 9.f, Color(120, 90, 130), ALIGN_LEFT | ALIGN_BASELINE);
 
         for (int i = 0; i < fCtlCount; ++i) if (fCtl[i].param == pDrumVolume && fCtl[i].type == ctKnob) drawKnob(fCtl[i], C.accent, true);
     }
@@ -2201,7 +2617,7 @@ private:
     int fPrevChar = 0;
     bool fInited = false;
 
-    static constexpr int kMaxCtl = 320;
+    static constexpr int kMaxCtl = 400;
     Control fCtl[kMaxCtl];
     int fEraTab = 0, fLastPreset = 0, fEditUser = 0;
     float fLX = 0, fLY = 0, fHairSway = 0, fMouseT = -100, fLastFrameT = 0;
@@ -2210,6 +2626,9 @@ private:
     bool fPixelUI = true, fPrevPixel = true;
     float fHeroU = 92.f, fHeroY = 214.f;
     bool fDrawingIdol = false, fEditing = false, fForceVocal = false;
+    bool fRuLayout = false, fScenesOpen = false, fStoryMenu = false;
+    int fStory = -1, fStoryStep = 0, fStoryForce = -1; float fStoryStartVal = 0, fStoryT = 0, fStoryDoneT = -1;
+    Box fStoryNext, fStoryExit;
     int fIdolShown = -1, fPrevIdol = 0; float fIdolSwitchT = -10;
     std::string fLyrics, fEditBuf;
     std::vector<Syllable> fSyl;

@@ -26,6 +26,15 @@ SPECS = [
   dict(key="kalimba",  repo="vcsl", folder="Idiophones/Plucked Idiophones/Kalimba, Tanzania", rx=r"_([A-G]#?\d)_k\d+_50_100_rr\d\.wav$", spacing=4, rate=32000, maxlen=2.0, loop=False, rng=(35, 84)),
   dict(key="zither",   repo="vcsl", folder="Chordophones/Zithers/Dan Tranh", rx=r"^Normal/([A-G]#?\d)_mf_1\.wav$", spacing=5, rate=32000, maxlen=2.5, loop=False, rng=(40, 90)),
   dict(key="harpsi",   repo="vcsl", folder="Chordophones/Zithers/Harpsichord, Flemish", rx=r"_([A-G]#?\d)_[^/]*rr1[^/]*\.wav$", spacing=5, rate=32000, maxlen=2.0, loop=False, rng=(29, 89)),
+  # ---- rock / battle (pitch detected from the audio, names in these folders are unreliable)
+  dict(key="trumpet",  repo="vsco", folder="Brass/Trumpet/sus", rx=r"_sus_([A-G]#?\d)_v3_rr1\.wav$", spacing=3, rate=24000, maxlen=2.4, loop=True, rng=(0, 127), detect=True),
+  dict(key="horn",     repo="vsco", folder="Brass/F Horn/sus", rx=r"_sus_([A-G]#?\d)_v2_1\.wav$", spacing=4, rate=24000, maxlen=2.4, loop=True, rng=(0, 127), detect=True),
+  dict(key="trombone", repo="vsco", folder="Brass/Tenor Trombone/sus", rx=r"_sus_([A-G]#?\d)_v2_1\.wav$", spacing=4, rate=24000, maxlen=2.4, loop=True, rng=(0, 127), detect=True),
+  dict(key="tpstac",   repo="vsco", folder="Brass/Trumpet/stac", rx=r"_stac_([A-G]#?\d)_v3_rr1\.wav$", spacing=4, rate=24000, maxlen=0.8, loop=False, rng=(0, 127), detect=True),
+  dict(key="tbstac",   repo="vsco", folder="Brass/Tenor Trombone/stac", rx=r"_stac_([A-G]#?\d)_v3_rr1\.wav$", spacing=5, rate=24000, maxlen=0.8, loop=False, rng=(0, 127), detect=True),
+  dict(key="vspic",    repo="vsco", folder="Strings/Violin Section/Spic", rx=r"_([A-G]#?\d)_v2_rr1\.wav$", spacing=4, rate=24000, maxlen=0.6, loop=False, rng=(55, 100)),
+  dict(key="cspic",    repo="vsco", folder="Strings/Cello Section/spic", rx=r"^spic_([A-G]#?\d)_v2_RR1\.wav$", spacing=5, rate=24000, maxlen=0.7, loop=False, rng=(36, 62)),
+  dict(key="timp",     repo="vcsl", folder="Membranophones/Struck Membranophones/Timpani 2/Hit", rx=r"^Timpani([1-8])A_hit_v3_rr1_main\.wav$", spacing=0, rate=24000, maxlen=2.5, loop=False, rng=(0, 127), detect=True, nonote=True),
 ]
 # drum hits for the "Live (2000s)" kit: lane -> (repo, path regex)
 DRUMS = [

@@ -28,6 +28,14 @@ extern const uint8_t kSmp_chimes[];
 extern const uint8_t kSmp_kalimba[];
 extern const uint8_t kSmp_zither[];
 extern const uint8_t kSmp_harpsi[];
+extern const uint8_t kSmp_trumpet[];
+extern const uint8_t kSmp_horn[];
+extern const uint8_t kSmp_trombone[];
+extern const uint8_t kSmp_tpstac[];
+extern const uint8_t kSmp_tbstac[];
+extern const uint8_t kSmp_vspic[];
+extern const uint8_t kSmp_cspic[];
+extern const uint8_t kSmp_timp[];
 extern const uint8_t kSmp_drums[];
 
 static const SampleZone kZ_piano[] = {
@@ -194,6 +202,69 @@ static const SampleZone kZ_harpsi[] = {
     {241506, 25238, 0, 0, 32000, 78, 0.4983f},
     {266744, 27473, 0, 0, 32000, 84, 0.5244f},
 };
+static const SampleZone kZ_trumpet[] = {
+    {0, 54144, 35860, 54144, 24000, 53, 0.5266f},
+    {54144, 54144, 39171, 54144, 24000, 57, 0.5955f},
+    {108288, 54144, 36224, 54144, 24000, 60, 0.5651f},
+    {162432, 54144, 34551, 54144, 24000, 63, 1.0000f},
+    {216576, 54144, 33606, 54144, 24000, 67, 0.8887f},
+    {270720, 54144, 35524, 54144, 24000, 70, 0.6285f},
+    {324864, 54144, 34096, 54144, 24000, 74, 0.8344f},
+    {379008, 54144, 37582, 54144, 24000, 77, 0.5391f},
+    {433152, 54144, 37792, 54144, 24000, 81, 0.9110f},
+    {487296, 54144, 36693, 54144, 24000, 84, 0.6657f},
+};
+static const SampleZone kZ_horn[] = {
+    {0, 54144, 40963, 54144, 24000, 36, 0.9175f},
+    {54144, 54144, 30617, 54144, 24000, 43, 0.9926f},
+    {108288, 54144, 30911, 54144, 24000, 50, 0.2962f},
+    {162432, 54144, 35160, 54144, 24000, 57, 1.0000f},
+};
+static const SampleZone kZ_trombone[] = {
+    {0, 54144, 33137, 54144, 24000, 34, 0.9475f},
+    {54144, 54144, 34082, 54144, 24000, 39, 0.3450f},
+    {108288, 54144, 41376, 54144, 24000, 46, 0.5232f},
+    {162432, 54144, 39269, 54144, 24000, 50, 0.3086f},
+    {216576, 54144, 30568, 54144, 24000, 60, 0.6078f},
+    {270720, 54144, 36070, 54144, 24000, 65, 1.0000f},
+};
+static const SampleZone kZ_tpstac[] = {
+    {0, 18144, 0, 0, 24000, 53, 0.1365f},
+    {18144, 17449, 0, 0, 24000, 57, 0.2870f},
+    {35593, 17539, 0, 0, 24000, 63, 0.4725f},
+    {53132, 17704, 0, 0, 24000, 67, 0.3573f},
+    {70836, 17221, 0, 0, 24000, 74, 1.0000f},
+    {88057, 16918, 0, 0, 24000, 81, 0.7753f},
+};
+static const SampleZone kZ_tbstac[] = {
+    {0, 16848, 0, 0, 24000, 34, 0.1786f},
+    {16848, 16422, 0, 0, 24000, 41, 0.3546f},
+    {33270, 14624, 0, 0, 24000, 46, 1.0000f},
+    {47894, 16884, 0, 0, 24000, 53, 0.3176f},
+    {64778, 16238, 0, 0, 24000, 58, 0.7395f},
+    {81016, 15822, 0, 0, 24000, 65, 0.6006f},
+};
+static const SampleZone kZ_vspic[] = {
+    {0, 13718, 0, 0, 24000, 57, 0.3778f},
+    {13718, 12843, 0, 0, 24000, 64, 0.3809f},
+    {26561, 13083, 0, 0, 24000, 71, 1.0000f},
+};
+static const SampleZone kZ_cspic[] = {
+    {0, 16619, 0, 0, 24000, 38, 0.7786f},
+    {16619, 16509, 0, 0, 24000, 45, 1.0000f},
+    {33128, 15736, 0, 0, 24000, 52, 0.7543f},
+    {48864, 16251, 0, 0, 24000, 59, 0.7653f},
+};
+static const SampleZone kZ_timp[] = {
+    {57914, 57511, 0, 0, 24000, 30, 0.6831f},
+    {115425, 58194, 0, 0, 24000, 34, 0.4135f},
+    {173619, 52981, 0, 0, 24000, 41, 1.0000f},
+    {379889, 53497, 0, 0, 24000, 41, 0.7741f},
+    {226600, 54250, 0, 0, 24000, 43, 0.9719f},
+    {0, 57914, 0, 0, 24000, 45, 0.3967f},
+    {280850, 41552, 0, 0, 24000, 53, 0.4309f},
+    {322402, 57487, 0, 0, 24000, 65, 0.3186f},
+};
 
 static const SampleSet kSampleSets[] = {
     {"piano", kSmp_piano, kZ_piano, 15},
@@ -217,8 +288,16 @@ static const SampleSet kSampleSets[] = {
     {"kalimba", kSmp_kalimba, kZ_kalimba, 11},
     {"zither", kSmp_zither, kZ_zither, 6},
     {"harpsi", kSmp_harpsi, kZ_harpsi, 10},
+    {"trumpet", kSmp_trumpet, kZ_trumpet, 10},
+    {"horn", kSmp_horn, kZ_horn, 4},
+    {"trombone", kSmp_trombone, kZ_trombone, 6},
+    {"tpstac", kSmp_tpstac, kZ_tpstac, 6},
+    {"tbstac", kSmp_tbstac, kZ_tbstac, 6},
+    {"vspic", kSmp_vspic, kZ_vspic, 3},
+    {"cspic", kSmp_cspic, kZ_cspic, 4},
+    {"timp", kSmp_timp, kZ_timp, 8},
 };
-static const int kSampleSetCount = 21;
+static const int kSampleSetCount = 29;
 
 // live kit, lane order = DrumLane
 static const SampleZone kDrumZones[9] = {

@@ -76,7 +76,7 @@ struct UserSample {
 bool loadAudioFileMono(const char* path, std::vector<float>& out, double& rate);
 
 // ------------------------------------------------------------------ instrument definitions
-enum SrcType { srcSample, srcChoir, srcGuitar };
+enum SrcType { srcSample, srcChoir, srcGuitar, srcDistGtr, srcBassGtr, srcOrgan, srcSaw, srcSquare, srcDrum };
 struct Layer { const char* set; int lo, hi; float gain, pitch; };
 struct XPInst {
     SrcType src;
@@ -90,6 +90,13 @@ struct XPInst {
     float randDetune;       // random cents per note
     float octLayer;         // extra layer one octave below
     float level;
+    // rock / battle extras
+    float drive;            // distortion amount
+    int chord;              // 1 = power chord (root + 5th + octave)
+    float mute;             // palm mute (extra string damping)
+    float sustain;          // lead guitar sustain (0..1)
+    int rhythm;             // 8 or 16: retrigger held notes in tempo
+    int arp;                // 1 = arpeggiate held notes
 };
 
 #define L1(s)            {{s, 0, 127, 1, 0}, {nullptr,0,0,0,0}, {nullptr,0,0,0,0}}
@@ -136,6 +143,42 @@ static const XPInst kXP[kNumXP] = {
 #undef ENS
 #undef ENSP
 
+#define L1(s)            {{s, 0, 127, 1, 0}, {nullptr,0,0,0,0}, {nullptr,0,0,0,0}}
+#define NOL              {{nullptr,0,0,0,0}, {nullptr,0,0,0,0}, {nullptr,0,0,0,0}}
+// ROCK / BATTLE (inst 58..77)
+static const XPInst kRock[kNumRock] = {
+    // src        layers  a      d     s     r      cut    vc    det  vib  rev  crush rnd oct  level  drive chord mute sust rhythm arp
+    {srcDistGtr, NOL,    0.0f,  9,  1.0f, 0.15f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.85f, 6.0f, 1, 0.0f, 0.0f, 0, 0},   // Power Chords
+    {srcDistGtr, NOL,    0.0f,  9,  1.0f, 0.12f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.85f, 6.0f, 0, 0.0f, 0.0f, 0, 0},   // Dist Guitar
+    {srcDistGtr, NOL,    0.0f,  9,  1.0f, 0.25f, 20000, 0.0f,  0,  22, false, 0, 0, 0, 0.75f, 9.0f, 0, 0.0f, 1.0f, 0, 0},   // Lead Guitar
+    {srcDistGtr, NOL,    0.0f,  9,  1.0f, 0.40f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 1.00f, 0.6f, 0, 0.0f, 0.0f, 0, 0},   // Clean Guitar
+    {srcDistGtr, NOL,    0.0f,  9,  1.0f, 0.06f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.90f, 6.0f, 1, 1.0f, 0.0f, 0, 0},   // Palm Mute
+    {srcDistGtr, NOL,    0.0f,  9,  1.0f, 0.04f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.90f, 6.0f, 1, 1.0f, 0.0f, 16, 0},  // Chug 16th
+    {srcBassGtr, NOL,    0.0f,  9,  1.0f, 0.12f,  2600, 0.4f,  0,   0, false, 0, 0, 0, 1.10f, 1.5f, 0, 0.0f, 0.0f, 0, 0},   // Bass Guitar
+    {srcOrgan,   NOL,  0.005f,  9,  1.0f, 0.08f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.55f, 2.5f, 0, 0.0f, 0.0f, 0, 0},   // Rock Organ
+    {srcSaw,     NOL,   0.01f,  9,  1.0f, 0.20f,  6500, 0.3f, 12,  15, false, 0, 0, 0, 0.55f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Synth Lead
+    {srcSaw,     NOL,   0.45f,  9,  1.0f, 1.00f,  4500, 0.0f, 28,   0, false, 0, 0, 0, 0.45f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Supersaw Pad
+    {srcSaw,     NOL,    0.0f, 0.16f, 0.0f, 0.10f, 3800, 0.4f, 10,   0, false, 0, 0, 0, 0.65f, 0.0f, 0, 0.0f, 0.0f, 16, 1},  // Battle Arp
+    {srcSample, {{"trombone", 0, 47, 1.0f, 0}, {"horn", 48, 62, 1.0f, 0}, {"trumpet", 63, 127, 1.0f, 0}},
+                         0.06f,  1,  1.0f, 0.30f, 20000, 0.4f,  0,   0, false, 0, 0, 0, 1.45f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Brass Section
+    {srcSample, {{"tbstac", 0, 57, 1.0f, 0}, {"tpstac", 58, 127, 1.0f, 0}, {nullptr,0,0,0,0}},
+                         0.0f,   1,  1.0f, 0.12f, 20000, 0.4f,  0,   0, false, 0, 0, 0, 1.20f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Brass Stabs
+    {srcSample, {{"cspic", 0, 56, 1.0f, 0}, {"vspic", 57, 127, 1.0f, 0}, {nullptr,0,0,0,0}},
+                         0.0f,   1,  1.0f, 0.10f, 20000, 0.4f,  0,   0, false, 0, 0, 0, 1.30f, 0.0f, 0, 0.0f, 0.0f, 8, 0},   // Str Ostinato
+    {srcSample, L1("timp"),  0.0f, 9, 1.0f, 1.00f, 20000, 0.3f,  0,   0, false, 0, 0, 0, 1.40f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Timpani
+    {srcDrum,    NOL,    0.0f, 0.55f, 0.0f, 0.60f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.75f, 1.5f, 0, 0.0f, 0.0f, 0, 0},  // Taiko
+    {srcSample, {{"tpstac", 0, 127, 1.0f, 0}, {"tbstac", 0, 127, 0.9f, -12}, {"vspic", 0, 127, 0.8f, 0}},
+                         0.0f,   1,  1.0f, 0.30f, 20000, 0.3f,  0,   0, false, 0, 0, 0, 1.10f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Orchestra Hit
+    {srcChoir,   NOL,   0.05f,  1,  1.0f, 0.60f,  6000, 0.2f, 14,   0, false, 0, 0, 0, 1.25f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Battle Choir
+    {srcDrum,    NOL,    0.0f, 0.35f, 0.0f, 0.40f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.75f, 0.6f, 0, 0.0f, 0.0f, 0, 0},  // Epic Toms
+    {srcSquare,  NOL,    0.0f,  9,  1.0f, 0.08f, 20000, 0.0f,  0,  10, false, 0, 0, 0, 0.85f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Chip Square
+};
+#undef L1
+#undef NOL
+
+static inline const XPInst& instDef(int inst) { return inst >= kFirstRock ? kRock[inst - kFirstRock] : kXP[inst - kFirstXP]; }
+static inline int defSlot(int inst) { return inst >= kFirstRock ? kNumXP + (inst - kFirstRock) : inst - kFirstXP; }
+
 static const XPInst kUserDef = {srcSample, {{nullptr,0,0,0,0},{nullptr,0,0,0,0},{nullptr,0,0,0,0}},
                                 0.002f, 9, 1, 0.25f, 20000, 0.0f, 0, 0, false, 0, 0, 0, 1.0f};
 
@@ -146,8 +189,11 @@ public:
     static constexpr int KS = 8192;   // Karplus-Strong buffer per voice
 
     Sampler() : bank(SampleBank::get()) {
-        for (int i = 0; i < kNumXP; ++i)
-            for (int l = 0; l < 3; ++l) setIdx[i][l] = kXP[i].layer[l].set ? bank.find(kXP[i].layer[l].set) : -1;
+        for (int i = 0; i < kNumXP + kNumRock; ++i)
+        {
+            const XPInst& D = i < kNumXP ? kXP[i] : kRock[i - kNumXP];
+            for (int l = 0; l < 3; ++l) setIdx[i][l] = D.layer[l].set ? bank.find(D.layer[l].set) : -1;
+        }
         ks.assign(NV * KS, 0.f);
         for (auto& u : user) u.store(nullptr);
         for (int k = 0; k < kNumUser; ++k) userRoot[k] = 60;
@@ -159,7 +205,7 @@ public:
     void setUser(int k, UserSample* s) { user[k].store(s); }
     void setUserRoot(int k, int n) { userRoot[k] = n; }
 
-    void noteOn(int inst, int note, int vel, double transpose) {
+    void noteOn(int inst, int note, int vel, double transpose, float gainMul = 1.f) {
         Voice* best = nullptr;
         for (auto& v : voices) if (!v.active) { best = &v; break; }
         if (!best) { uint32_t ba = 0xFFFFFFFFu; for (auto& v : voices) if (v.age < ba) { ba = v.age; best = &v; } }
@@ -169,7 +215,7 @@ public:
         const double x = vel / 127.0;
         v.vel = (float)x;
         const double n = note + transpose;
-        if (inst >= kFirstUser) {
+        if (inst >= kFirstUser && inst < kFirstRock) {
             const int k = inst - kFirstUser;
             UserSample* u = user[k].load();
             if (!u || u->zone.len < 4) return;
@@ -177,7 +223,8 @@ public:
             addPlay(v, &u->zone, n, 0, 1.f, 0.f, false);
             v.def = &kUserDef;
         } else {
-            const XPInst& I = kXP[inst - kFirstXP];
+            const XPInst& I = instDef(inst);
+            const int slot = defSlot(inst);
             v.def = &I;
             v.src = I.src;
             double rnd = 0;
@@ -185,15 +232,15 @@ public:
             if (I.src == srcSample) {
                 for (int l = 0; l < 3; ++l) {
                     const Layer& L = I.layer[l];
-                    if (!L.set || setIdx[inst - kFirstXP][l] < 0 || note < L.lo || note > L.hi) continue;
-                    const Zone* z = pick(setIdx[inst - kFirstXP][l], n + L.pitch);
+                    if (!L.set || setIdx[slot][l] < 0 || note < L.lo || note > L.hi) continue;
+                    const Zone* z = pick(setIdx[slot][l], n + L.pitch);
                     if (!z) continue;
                     if (I.detune > 0) {
                         addPlay(v, z, n + L.pitch + rnd - I.detune / 200.0, 0, L.gain * 0.75f, -0.6f, I.reverse);
                         addPlay(v, z, n + L.pitch + rnd + I.detune / 200.0, 0, L.gain * 0.75f, 0.6f, I.reverse);
                     } else addPlay(v, z, n + L.pitch + rnd, 0, L.gain, 0.f, I.reverse);
                     if (I.octLayer > 0) {
-                        const Zone* zo = pick(setIdx[inst - kFirstXP][l], n + L.pitch - 12);
+                        const Zone* zo = pick(setIdx[slot][l], n + L.pitch - 12);
                         if (zo) addPlay(v, zo, n + L.pitch - 12, 0, L.gain * I.octLayer, 0.f, I.reverse);
                     }
                 }
@@ -203,6 +250,36 @@ public:
                 for (int k = 0; k < 3; ++k) v.ph[k] = (k * 0.31);
                 std::memset(v.fs, 0, sizeof(v.fs));
                 v.cdet = I.detune > 0 ? I.detune : 9.f;
+            } else if (I.src == srcDistGtr || I.src == srcBassGtr) {
+                // 1..3 Karplus-Strong strings (power chord = root, fifth, octave)
+                const double base = 440.0 * std::pow(2.0, (n - 69) / 12.0);
+                static const double iv[3] = { 0, 7, 12 };
+                v.nstr = (I.chord && I.src == srcDistGtr) ? 3 : 1;
+                float* bufAll = &ks[(&v - voices) * KS];
+                const int seg = KS / 3;
+                for (int k = 0; k < v.nstr; ++k) {
+                    const double f = base * std::pow(2.0, iv[k] / 12.0);
+                    v.sLen[k] = std::min((double)seg - 2, srate / f);
+                    float* buf = bufAll + k * seg;
+                    const int N = (int)v.sLen[k] + 2;
+                    float lp = 0;
+                    const float pickc = I.src == srcBassGtr ? 0.5f : (I.mute > 0 ? 0.25f : 0.6f + 0.3f * (float)x);
+                    for (int i = 0; i < N; ++i) {
+                        rng = rng * 1664525u + 1013904223u;
+                        const float nz = (rng >> 8) / 8388608.f - 1.f;
+                        lp += (nz - lp) * pickc;
+                        buf[i] = lp * (k == 0 ? 1.f : 0.8f);
+                    }
+                    v.sPos[k] = 0; v.sPrev[k] = 0;
+                }
+                v.ksDamp = I.mute > 0 ? 0.93f : (I.sustain > 0 ? 0.99985f : (I.src == srcBassGtr ? 0.9975f : 0.9992f));
+                std::memset(v.cab, 0, sizeof(v.cab));
+                v.freq = base;
+            } else if (I.src == srcOrgan || I.src == srcSaw || I.src == srcSquare || I.src == srcDrum) {
+                v.freq = 440.0 * std::pow(2.0, (n - 69) / 12.0);
+                for (int k = 0; k < 7; ++k) { rng = rng * 1664525u + 1013904223u; v.oph[k] = (rng >> 8) / 16777216.0; }
+                v.t = 0;
+                std::memset(v.cab, 0, sizeof(v.cab));
             } else {
                 // Karplus-Strong pluck
                 v.freq = 440.0 * std::pow(2.0, (n - 69) / 12.0);
@@ -227,7 +304,7 @@ public:
         v.atk = D.a <= 0.0005f ? 1.0 : 1.0 / (D.a * srate);
         v.dec = std::exp(-1.0 / (std::max(0.01f, D.d) * srate));
         v.rel = std::exp(-1.0 / (std::max(0.01f, D.r * relMul) * srate));
-        v.amp = (float)((0.35 + 0.65 * x * x) * D.level);
+        v.amp = (float)((0.35 + 0.65 * x * x) * D.level * gainMul);
         const double cut = std::min(18000.0, D.cutoff * (1.0 - D.velCut + D.velCut * x) * bright);
         v.lpc = (float)(1.0 - std::exp(-2.0 * 3.14159265 * std::max(60.0, cut) / srate));
         v.lpOn = cut < 17000;
@@ -294,6 +371,67 @@ public:
                     o += bp * G[k];
                 }
                 l = r = (float)(o * 0.32);
+            } else if (v.src == srcDistGtr || v.src == srcBassGtr) {
+                float* bufAll = &ks[(&v - voices) * KS];
+                const int seg = KS / 3;
+                float sum = 0;
+                const float damp = v.released ? (D.mute > 0 ? 0.85f : 0.97f) : v.ksDamp;
+                for (int k = 0; k < v.nstr; ++k) {
+                    float* buf = bufAll + k * seg;
+                    const int N = (int)v.sLen[k];
+                    const float fr = (float)(v.sLen[k] - N);
+                    const int i0 = v.sPos[k], i1 = (i0 + 1) % N;
+                    const float y = buf[i0] * (1 - fr) + buf[i1] * fr;
+                    float nv = (y + v.sPrev[k]) * 0.5f * damp;
+                    if (D.sustain > 0 && !v.released) nv += std::tanh(y * 3.f) * 0.0009f * D.sustain;   // feedback keeps the lead singing
+                    v.sPrev[k] = y; buf[i0] = nv;
+                    v.sPos[k] = (i0 + 1) % N;
+                    sum += y;
+                }
+                // pickup + amp: high-pass, drive, cabinet low-pass
+                v.cab[0] += (sum - v.cab[0]) * 0.012f;          // DC / low cut
+                float xg = sum - v.cab[0];
+                if (D.drive > 1.f) {
+                    xg = std::tanh(xg * D.drive * 1.6f + 0.15f) - std::tanh(0.15f);
+                    v.cab[1] += (xg - v.cab[1]) * 0.33f; v.cab[2] += (v.cab[1] - v.cab[2]) * 0.33f; // cabinet
+                    xg = v.cab[2] * 0.9f;
+                } else if (D.drive > 0.f) xg = std::tanh(xg * (0.6f + D.drive)) * 0.9f;
+                if (v.src == srcBassGtr) xg *= 1.3f;
+                l = r = xg;
+                (void)pm;
+            } else if (v.src == srcOrgan) {
+                static const double ratio[6] = { 0.5, 1, 1.5, 2, 3, 4 }, g[6] = { 0.7, 1.0, 0.5, 0.65, 0.4, 0.3 };
+                double o = 0;
+                for (int k = 0; k < 6; ++k) { v.oph[k] += v.freq * pm * ratio[k] / srate; if (v.oph[k] >= 1) v.oph[k] -= 1; o += std::sin(6.2831853 * v.oph[k]) * g[k]; }
+                v.t += 1.0 / srate;
+                if (v.t < 0.006) { rng = rng * 1664525u + 1013904223u; o += ((rng >> 8) / 8388608.0 - 1.0) * 0.6 * (1 - v.t / 0.006); }   // key click
+                const float dr = (float)std::tanh(o * 0.35 * D.drive) / (float)std::tanh(0.35 * D.drive);
+                v.oph[6] += 6.3 / srate; if (v.oph[6] >= 1) v.oph[6] -= 1;                       // rotary speaker
+                const float rot = (float)std::sin(6.2831853 * v.oph[6]);
+                l = dr * (0.8f + 0.2f * rot); r = dr * (0.8f - 0.2f * rot);
+            } else if (v.src == srcSaw || v.src == srcSquare) {
+                const int nv = v.src == srcSquare ? 1 : (D.detune > 15 ? 5 : 3);
+                double o = 0;
+                for (int k = 0; k < nv; ++k) {
+                    const double det = nv == 1 ? 1.0 : std::pow(2.0, ((k - (nv - 1) * 0.5) / ((nv - 1) * 0.5)) * D.detune / 1200.0);
+                    const double dt = v.freq * pm * det / srate;
+                    v.oph[k] += dt; if (v.oph[k] >= 1) v.oph[k] -= 1;
+                    const double p = v.oph[k];
+                    if (v.src == srcSquare) {
+                        double sq = p < 0.25 ? 1.0 : -1.0;
+                        sq += blep(p, dt); sq -= blep(std::fmod(p + 0.75, 1.0), dt);
+                        o += sq * 0.6;
+                    } else o += (2 * p - 1) - blep(p, dt);
+                }
+                l = r = (float)(o / std::sqrt((double)nv) * 0.6);
+            } else if (v.src == srcDrum) {
+                v.t += 1.0 / srate;
+                const double f = v.freq * (1.0 + 1.6 * std::exp(-v.t / 0.035));
+                v.oph[0] += f / srate; if (v.oph[0] >= 1) v.oph[0] -= 1;
+                rng = rng * 1664525u + 1013904223u;
+                const double nz = ((rng >> 8) / 8388608.0 - 1.0) * std::exp(-v.t / 0.018);
+                const double o = std::sin(6.2831853 * v.oph[0]) + nz * 0.5;
+                l = r = (float)(std::tanh(o * (1.0 + D.drive)) * 0.9);
             } else {
                 float* buf = &ks[(&v - voices) * KS];
                 const int N = (int)v.ksLen;
@@ -338,7 +476,14 @@ private:
         // synth sources
         double freq = 440, ph[3] = {0,0,0}, fs[3][2] = {{0,0},{0,0},{0,0}}; float cdet = 9;
         double ksLen = 100; int ksPos = 0; float ksPrev = 0, ksDamp = 0.996f, body = 0;
+        int nstr = 1; double sLen[3] = {100, 100, 100}; int sPos[3] = {0, 0, 0}; float sPrev[3] = {0, 0, 0};
+        float cab[4] = {0, 0, 0, 0}; double oph[7] = {0, 0, 0, 0, 0, 0, 0}; double t = 0;
     };
+    static inline double blep(double p, double dt) {
+        if (p < dt) { const double t = p / dt; return t + t - t * t - 1.0; }
+        if (p > 1.0 - dt) { const double t = (p - 1.0) / dt; return t * t + t + t + 1.0; }
+        return 0.0;
+    }
 
     void release(Voice& v) { v.released = true; v.held = false; v.stage = 3; }
 
@@ -363,7 +508,7 @@ private:
     }
 
     const SampleBank& bank;
-    int setIdx[kNumXP][3];
+    int setIdx[kNumXP + kNumRock][3];
     Voice voices[NV];
     std::vector<float> ks;
     std::atomic<UserSample*> user[kNumUser];

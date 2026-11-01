@@ -23,7 +23,7 @@ protected:
     const char* getDescription() const override { return "FM synth + drum machine in the style of PC-98 / 90s visual novels and RPG Maker music"; }
     const char* getMaker() const override { return "RetroNovel"; }
     const char* getLicense() const override { return "ISC"; }
-    uint32_t getVersion() const override { return d_version(5, 0, 0); }
+    uint32_t getVersion() const override { return d_version(6, 0, 0); }
 
     static void setEnum(Parameter& p, const char* const* names, int count)
     {
@@ -54,7 +54,7 @@ protected:
         {
         case retrofm::pInstrument: setEnum(p, retrofm::kInstrumentNames, retrofm::kNumInstruments); break;
         case retrofm::pDrumMode:   setEnum(p, retrofm::kDrumModeNames, 3); break;
-        case retrofm::pDrumKit:    setEnum(p, retrofm::kDrumKitNames, 4); break;
+        case retrofm::pDrumKit:    setEnum(p, retrofm::kDrumKitNames, 5); break;
         case retrofm::pDrumPattern:
         {
             const char* names[retrofm::kNumPatterns];
@@ -67,6 +67,14 @@ protected:
         case retrofm::pVocalMode:
             p.hints |= kParameterIsBoolean;
             break;
+        case retrofm::pScene:
+        {
+            const char* names[retrofm::kNumScenes + 1];
+            names[0] = "Off";
+            for (int i = 0; i < retrofm::kNumScenes; ++i) names[i + 1] = retrofm::kScenes[i].name;
+            setEnum(p, names, retrofm::kNumScenes + 1);
+            break;
+        }
         case retrofm::pIdol:
         {
             const char* names[retrofm::kNumIdols];

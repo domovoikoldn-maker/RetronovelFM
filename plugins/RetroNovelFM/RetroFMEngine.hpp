@@ -138,16 +138,75 @@ public:
         }
         if (st == 0x90 && m3 > 0) {
             const int inst = (int)std::floor(params[pInstrument] + 0.5f);
+            const int scene = (int)std::floor(params[pScene] + 0.5f);
             if (params[pVocalMode] > 0.5f) vocal.noteOn(m2 + (int)params[pTranspose], m3);
-            else if (inst < kNumFM) noteOn(m2, m3);
-            else sampler.noteOn(inst, m2, m3, params[pTranspose]);
+            else if (scene > 0 && scene <= kNumScenes) {
+                const ScenePreset& S = kScenes[scene - 1];
+                for (int k = 0; k < 3; ++k) {
+                    const ScenePart& P = S.part[k];
+                    if (P.inst < 0 || m2 < P.lo || m2 > P.hi) continue;
+                    playInst(P.inst, m2, m3, P.gain);
+                }
+            }
+            else playInst(inst, m2, m3, 1.f);
         }
-        else if (st == 0x80 || (st == 0x90 && m3 == 0)) { noteOff(m2); sampler.noteOff(m2, pedal); vocal.noteOff(m2 + (int)params[pTranspose]); }
+        else if (st == 0x80 || (st == 0x90 && m3 == 0)) { noteOff(m2); sampler.noteOff(m2, pedal); vocal.noteOff(m2 + (int)params[pTranspose]); rhythmOff(m2); }
         else if (st == 0xE0) { bend = ((m3 * 128 + m2) - 8192) / 8192.0; bendmul = std::pow(2.0, bend * params[pBendRange] / 12.0); }
         else if (st == 0xB0) {
             if (m2 == 1) modwheel = m3 / 127.0;
             else if (m2 == 64) { bool p = m3 >= 64; if (pedal && !p) pedalUpAll(); pedal = p; }
-            else if (m2 == 120 || m2 == 123) { allOff(); sampler.allOff(); vocal.allOff(); }
+            else if (m2 == 120 || m2 == 123) { allOff(); sampler.allOff(); vocal.allOff(); nr = 0; }
+        }
+    }
+
+    // play one instrument (FM / sampled / rock); rhythmic instruments are retriggered in tempo
+    void playInst(int inst, int note, int vel, float gain) {
+        if (inst < 0 || inst >= kNumInstruments) return;
+        if (inst < kNumFM) { noteOn(note, vel, gain); return; }
+        if (inst >= kFirstRock && instDef(inst).rhythm > 0) {
+            if (nr < 32) {
+                bool first = true;
+                for (int i = 0; i < nr; ++i) if (rn[i].inst == inst) first = false;
+                rn[nr].inst = inst; rn[nr].note = note; rn[nr].vel = vel; rn[nr].gain = gain; ++nr;
+                if (!instDef(inst).arp) sampler.noteOn(inst, note, vel, params[pTranspose], gain);
+                else if (first) { arpIdx = 0; arpNote = note; sampler.noteOn(inst, note, vel, params[pTranspose], gain); }
+            }
+            return;
+        }
+        sampler.noteOn(inst, note, vel, params[pTranspose], gain);
+    }
+    void rhythmOff(int note) {
+        int j = 0;
+        for (int i = 0; i < nr; ++i) if (rn[i].note != note) rn[j++] = rn[i];
+        nr = j;
+        if (arpNote >= 0) { bool alive = false; for (int i = 0; i < nr; ++i) if (instDef(rn[i].inst).arp) alive = true; if (!alive) { sampler.noteOff(arpNote, false); arpNote = -1; } }
+    }
+    // called every sample: 16th-note clock from the host (or free-running)
+    void rhythmTick() {
+        if (nr == 0) return;
+        rpos += rStepsPerSample;
+        const int64_t step = (int64_t)std::floor(rpos);
+        if (step == rLastStep) return;
+        rLastStep = step;
+        for (int i = 0; i < nr; ++i) {
+            const RNote& R = rn[i];
+            const XPInst& D = instDef(R.inst);
+            if (D.arp) continue;
+            if (D.rhythm == 8 && (step & 1)) continue;
+            sampler.noteOff(R.note, false);
+            sampler.noteOn(R.inst, R.note, R.vel, params[pTranspose], R.gain);
+        }
+        // arpeggio: walk up the held notes, then one octave higher
+        int list[32], vels[32], cnt = 0, ai = -1; float g = 1.f;
+        for (int i = 0; i < nr; ++i) if (instDef(rn[i].inst).arp) { list[cnt] = rn[i].note; vels[cnt++] = rn[i].vel; ai = rn[i].inst; g = rn[i].gain; }
+        if (cnt > 0) {
+            for (int a = 1; a < cnt; ++a) for (int b = a; b > 0 && list[b] < list[b - 1]; --b) { std::swap(list[b], list[b - 1]); std::swap(vels[b], vels[b - 1]); }
+            const int total = cnt * 2;
+            arpIdx = (arpIdx + 1) % total;
+            const int n = list[arpIdx % cnt] + (arpIdx >= cnt ? 12 : 0);
+            if (arpNote >= 0) sampler.noteOff(arpNote, false);
+            arpNote = n;
+            sampler.noteOn(ai, n, vels[arpIdx % cnt], params[pTranspose], g);
         }
     }
 
@@ -156,6 +215,8 @@ public:
         if (playing && !wasPlaying) vocal.rewind();      // lyrics restart with the song
         wasPlaying = playing;
         seq.transport((int)params[pDrumMode], playing, posValid, posSteps, bpm);
+        rStepsPerSample = (bpm > 0 ? bpm : 120.0) / 60.0 * 4.0 / srate;
+        if (playing && posValid && std::fabs(posSteps - rpos) > 0.25) rpos = posSteps;
     }
 
     // values for the UI
@@ -179,6 +240,7 @@ public:
         vph += vrateInc; if (vph >= 1) vph -= 1;
         const double pmul = bendmul * std::pow(2.0, std::sin(kTwoPi * vph) * (params[pVibDepth] + modwheel * 40) / 1200.0);
         double mix = 0, act = 0;
+        rhythmTick();
         float sL = 0, sR = 0;
         act += sampler.tick(pmul, sL, sR) * 0.8;
         const float vox = vocal.tick(bendmul);
@@ -261,7 +323,7 @@ private:
         return e;
     }
 
-    void noteOn(int n, int vel) {
+    void noteOn(int n, int vel, float gainMul = 1.f) {
         Voice* best = nullptr;
         for (auto& v : voices) if (!v.active) { best = &v; break; }
         if (!best) { uint32_t ba = 0xFFFFFFFFu; for (auto& v : voices) if (v.age < ba) { ba = v.age; best = &v; } }
@@ -270,7 +332,7 @@ private:
         v.active = true; v.released = false; v.held = false; v.note = n;
         v.inc = 440.0 * std::pow(2.0, (nn - 69) / 12.0) / srate;
         const double x = vel / 127.0, vs = params[pVelSens];
-        v.vc = (1 - vs) + vs * x * x;
+        v.vc = ((1 - vs) + vs * x * x) * gainMul;
         v.vm = (1 - vs * 0.6) + vs * 0.6 * x;
         v.age = ++serial; v.fb0 = v.fb1 = 0;
         double ks = std::pow(2.0, -(nn - 60) / 24.0); ks = ks < 0.3 ? 0.3 : (ks > 3 ? 3 : ks);
@@ -308,7 +370,11 @@ private:
     }
 
     void update() {
-        int pn = (int)std::floor(params[pInstrument] + 0.5f); pn = pn < 0 ? 0 : (pn > 23 ? 23 : pn);
+        int pn = (int)std::floor(params[pInstrument] + 0.5f);
+        const int scene = (int)std::floor(params[pScene] + 0.5f);
+        if (scene > 0 && scene <= kNumScenes)
+            for (int k = 0; k < 3; ++k) if (kScenes[scene - 1].part[k].inst >= 0 && kScenes[scene - 1].part[k].inst < kNumFM) pn = kScenes[scene - 1].part[k].inst;
+        pn = pn < 0 ? 0 : (pn > 23 ? 23 : pn);
         patch = &kPatches[pn];
         alg = patch->alg; fbk = patch->fb;
         car[0] = alg == 7; car[1] = alg >= 4; car[2] = alg >= 5; car[3] = true;
@@ -364,6 +430,9 @@ private:
     double vph = 0, vrateInc = 0, cph = 0, bend = 0, bendmul = 1, modwheel = 0;
     bool pedal = false; uint32_t serial = 0;
     Sampler sampler;
+    struct RNote { int inst, note, vel; float gain; };
+    RNote rn[32]; int nr = 0, arpIdx = 0, arpNote = -1;
+    double rpos = 0, rStepsPerSample = 0; int64_t rLastStep = -1;
     VocalSynth vocal;
     bool wasPlaying = false;
     DrumPattern pats[kNumPatterns];

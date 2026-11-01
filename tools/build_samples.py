@@ -33,7 +33,7 @@ for s in SPECS:
         if not f.startswith(pre): continue
         m = re.search(s['rx'], f[len(pre):])
         if not m: continue
-        n = midi(m.group(1))
+        n = 30 + int(m.group(1)) * 5 if s.get('nonote') else midi(m.group(1))
         if s['rng'][0] <= n <= s['rng'][1] and n not in cand: cand[n] = f
     last = -99
     for n in sorted(cand):
@@ -56,6 +56,25 @@ for repo in ('vcsl', 'vsco'):
 def load(repo, path, rate):
     r = subprocess.run(['ffmpeg', '-v', 'error', '-i', os.path.join(SRC, repo, path), '-ac', '1', '-ar', str(rate), '-f', 'f32le', '-'], capture_output=True, check=True)
     return np.frombuffer(r.stdout, dtype=np.float32).copy()
+
+def detect_midi(x, rate):
+    """autocorrelation pitch estimate on the steady part of a note -> fractional midi number"""
+    a = int(0.12 * rate); seg = x[a:a + int(0.35 * rate)].astype(np.float64)
+    if len(seg) < 2048: seg = x[:4096].astype(np.float64)
+    seg = seg - seg.mean()
+    n = len(seg)
+    f = np.fft.rfft(seg, 2 * n); ac = np.fft.irfft(f * np.conj(f))[:n]
+    ac /= ac[0] + 1e-12
+    lo, hi = int(rate / 1500), int(rate / 40)
+    region = ac[lo:hi]
+    peak = int(np.argmax(region)) + lo
+    # prefer the first peak that is almost as strong (avoids octave-down errors)
+    for i in range(lo + 1, peak):
+        if ac[i] > 0.88 * ac[peak] and ac[i] >= ac[i - 1] and ac[i] >= ac[i + 1]: peak = i; break
+    y0, y1, y2 = ac[peak - 1], ac[peak], ac[peak + 1]
+    d = 0.5 * (y0 - y2) / (y0 - 2 * y1 + y2 + 1e-12)
+    f0 = rate / (peak + d)
+    return 69 + 12 * np.log2(f0 / 440.0)
 
 def trim_start(x):
     pk = np.max(np.abs(x)) + 1e-9
@@ -120,6 +139,10 @@ for s in SPECS:
     blob = bytearray()
     for path, n, repo in zones:
         x = trim_start(load(repo, path, s['rate']))
+        if s.get('detect'):
+            dm = detect_midi(x, s['rate'])
+            print('   %s: named %d, detected %.2f' % (path.split('/')[-1], n, dm))
+            if np.isfinite(dm) and 24 <= dm <= 100: n = int(round(dm))
         if s['loop']: y, ls_, le_ = make_loop(x, s['rate'], s['maxlen'])
         else:
             y = oneshot(x, s['rate'], s['maxlen']); ls_, le_ = 0, 0
@@ -128,6 +151,7 @@ for s in SPECS:
         off = len(blob)
         blob += mulaw(y).tobytes()
         zl.append((off, len(y), ls_, le_, s['rate'], n, float(pk)))
+    zl.sort(key=lambda z: z[5])
     name = 'kSmp_' + s['key']
     emit_cpp(name, blob)
     total += len(blob)
