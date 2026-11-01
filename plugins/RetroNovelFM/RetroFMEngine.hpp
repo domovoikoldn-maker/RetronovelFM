@@ -4,40 +4,12 @@
 #include <cmath>
 #include <cstring>
 #include <cstdint>
+#include "RetroData.hpp"
+#include "RetroDrums.hpp"
 
 namespace retrofm {
 
 static constexpr double kTwoPi = 6.283185307179586;
-
-enum Param {
-    pInstrument = 0, pVolume, pBrightness, pRelease, pVibDepth, pVibRate,
-    pLofi, pChorus, pReverb, pBendRange, pTranspose, pVelSens,
-    kParamCount
-};
-
-struct ParamInfo { const char* name; const char* symbol; const char* unit; float def, min, max; bool integer; };
-
-static const ParamInfo kParams[kParamCount] = {
-    {"Instrument",          "instrument", "",      0,   0,   23,  true},
-    {"Volume",              "volume",     "dB",   -8, -40,    6,  false},
-    {"Brightness",          "brightness", "",      1,   0,    2,  false},
-    {"Release x",           "release",    "",      1, 0.1f,   4,  false},
-    {"Vibrato Depth",       "vibdepth",   "cents", 0,   0,   60,  false},
-    {"Vibrato Rate",        "vibrate",    "Hz",  5.5f, 0.5f, 10,  false},
-    {"Lo-Fi",               "lofi",       "",      0,   0,    1,  false},
-    {"Chorus",              "chorus",     "",   0.3f,   0,    1,  false},
-    {"Reverb",              "reverb",     "",  0.25f,   0,    1,  false},
-    {"Pitch Bend Range",    "bendrange",  "st",    2,   0,   12,  true},
-    {"Transpose",           "transpose",  "st",    0, -24,   24,  true},
-    {"Velocity Sens",       "velsens",    "",      1,   0,    1,  false},
-};
-
-static const char* const kInstrumentNames[24] = {
-    "FM E.Piano","Music Box","FM Strings","FM Brass","Slap Bass","Synth Bass",
-    "PC-98 Square Lead","Flute","Clarinet","Organ","Harp","Marimba",
-    "Vibraphone","Choir Pad","Celesta","Koto","Harpsichord","Oboe",
-    "Sitar","Steel Guitar","Warm Pad","Sine Lead","Tubular Bell","Kalimba"
-};
 
 struct Op { float ratio, level, a, d, s, r; };
 struct Patch { int alg; float fb; Op op[4]; };
@@ -89,6 +61,7 @@ public:
         std::memset(chb, 0, sizeof(chb));
         cw = 0; cph = vph = 0; hcnt = 0; held = 0;
         for (auto& v : voices) v.active = false;
+        drums.setSampleRate(sr); seq.setSampleRate(sr);
         update();
     }
 
@@ -99,6 +72,10 @@ public:
         if (size < 1) return;
         const uint8_t st = d[0] & 0xF0;
         const uint8_t m2 = size > 1 ? d[1] : 0, m3 = size > 2 ? d[2] : 0;
+        if ((d[0] & 0x0F) == 9) {            // MIDI channel 10 = drums (GM map)
+            if (st == 0x90 && m3 > 0) drums.trigger(gmLane(m2), m3 / 127.0f);
+            return;
+        }
         if (st == 0x90 && m3 > 0) noteOn(m2, m3);
         else if (st == 0x80 || (st == 0x90 && m3 == 0)) noteOff(m2);
         else if (st == 0xE0) { bend = ((m3 * 128 + m2) - 8192) / 8192.0; bendmul = std::pow(2.0, bend * params[pBendRange] / 12.0); }
@@ -109,6 +86,16 @@ public:
         }
     }
 
+    // call once per audio block with host transport info
+    void transport(bool playing, bool posValid, double posSteps, double bpm) {
+        seq.transport((int)params[pDrumMode], playing, posValid, posSteps, bpm);
+    }
+
+    // values for the UI
+    float outActivity() const { return (float)activity; }
+    float outDrumStep() const { return (float)seq.currentStep(); }
+    float outBeat() const { return drums.pulse; }
+
     void process(float* outL, float* outR, uint32_t n) {
         for (uint32_t s = 0; s < n; ++s) { float l, r; tick(l, r); outL[s] = l; outR[s] = r; }
     }
@@ -116,7 +103,7 @@ public:
     void tick(float& outL, float& outR) {
         vph += vrateInc; if (vph >= 1) vph -= 1;
         const double pmul = bendmul * std::pow(2.0, std::sin(kTwoPi * vph) * (params[pVibDepth] + modwheel * 40) / 1200.0);
-        double mix = 0;
+        double mix = 0, act = 0;
         for (auto& v : voices) {
             if (!v.active) continue;
             const double base = v.inc * pmul;
@@ -140,11 +127,13 @@ public:
                 default: o2 = S(1,0); o3 = S(2,0); o4 = S(3,0); out = o1+o2+o3+o4; break;
             }
             mix += out;
+            act += e[3] * v.vc;
             double emax = e[3];
             for (int k = 0; k < 3; ++k) if (car[k] && e[k] > emax) emax = e[k];
             if (v.stage[3] >= 2 && emax < 0.0001) v.active = false;
         }
 
+        activity += ((act > 1 ? 1 : act) - activity) * 0.0005;
         double dry = mix * norm * gain;
         if (lofi > 0) {
             if (++hcnt >= hold) { hcnt = 0; held = std::floor(dry * q + 0.5) / q; }
@@ -159,14 +148,17 @@ public:
         const double L = dry * (1 - 0.4 * chm) + tapL * 0.7 * chm;
         const double R = dry * (1 - 0.4 * chm) + tapR * 0.7 * chm;
 
-        const double rin = (L + R) * 0.5 * 0.015;
+        seq.tick(drums, params[pDrumFill] > 0.5f);
+        const double dr = drums.tick() * drumGain;
+
+        const double rin = ((L + R) * 0.5 + dr * 0.35) * 0.015;
         double cl = comb(0,rin) + comb(1,rin) + comb(2,rin) + comb(3,rin);
         double cr = comb(4,rin) + comb(5,rin) + comb(6,rin) + comb(7,rin);
         cl = apass(9, apass(8, cl));
         cr = apass(11, apass(10, cr));
         const double rv = params[pReverb];
-        outL = (float)(L + cl * 3 * rv);
-        outR = (float)(R + cr * 3 * rv);
+        outL = (float)softclip(L + dr + cl * 3 * rv);
+        outR = (float)softclip(R + dr + cr * 3 * rv);
     }
 
 private:
@@ -244,6 +236,31 @@ private:
         lofi = params[pLofi]; hold = 1 + (int)std::floor(lofi * 7); q = std::pow(2.0, 15 - lofi * 10);
         vrateInc = params[pVibRate] / srate;
         bendmul = std::pow(2.0, bend * params[pBendRange] / 12.0);
+        seq.setPattern((int)std::floor(params[pDrumPattern] + 0.5f));
+        drums.setKit((int)std::floor(params[pDrumKit] + 0.5f));
+        drumGain = std::pow(10.0, params[pDrumVolume] / 20.0);
+    }
+
+    static double softclip(double x) {
+        const double a = std::fabs(x);
+        if (a <= 0.8) return x;
+        const double y = 0.8 + 0.2 * std::tanh((a - 0.8) / 0.2);
+        return x < 0 ? -y : y;
+    }
+
+    static int gmLane(int n) {
+        switch (n) {
+            case 35: case 36: return dKick;
+            case 38: case 40: return dSnare;
+            case 37: return dRim;
+            case 39: return dClap;
+            case 42: case 44: return dCHat;
+            case 46: return dOHat;
+            case 41: case 43: case 45: return dTomL;
+            case 47: case 48: case 50: return dTomH;
+            case 49: case 51: case 52: case 55: case 57: return dCrash;
+            default: return -1;
+        }
     }
 
     double srate = 44100;
@@ -254,6 +271,7 @@ private:
     double lofi = 0, q = 32768, held = 0; int hold = 1, hcnt = 0;
     double vph = 0, vrateInc = 0, cph = 0, bend = 0, bendmul = 1, modwheel = 0;
     bool pedal = false; uint32_t serial = 0;
+    DrumSynth drums; DrumSequencer seq; double drumGain = 0.5, activity = 0;
     Voice voices[NV];
     float chb[CHN]; int cw = 0;
     float rvBuf[12][RB]; int rvLen[12], rvPos[12]; double rvSt[12];

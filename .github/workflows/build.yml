@@ -63,6 +63,8 @@ jobs:
           git clone --recursive https://github.com/DISTRHO/DPF dpf
           git -C dpf checkout $DPF_COMMIT
           git -C dpf submodule update --init --recursive
+      - name: Install UI dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libdbus-1-dev pkg-config
       - name: Build Linux x64
         run: make -j4
       - name: Zip
