@@ -21,13 +21,20 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64
       - name: Build Windows x64
         run: make WINDOWS=true CC=x86_64-w64-mingw32-gcc-posix CXX=x86_64-w64-mingw32-g++-posix AR=x86_64-w64-mingw32-ar -j4
+      - name: Check Windows binaries
+        run: |
+          find bin -type f -exec ls -la {} \;
+          for f in $(find bin -type f \( -name '*.vst3' -o -name '*.dll' -o -name '*.clap' \)); do
+            file "$f"
+            echo "DLL deps of $f:"; x86_64-w64-mingw32-objdump -p "$f" | grep "DLL Name"
+            echo "Exports:"; x86_64-w64-mingw32-objdump -p "$f" | grep -E "GetPluginFactory|VSTPluginMain|clap_entry" || true
+          done
+      - name: Zip
+        run: cd bin && zip -r ../RetroNovelFM-Windows-x64.zip RetroNovelFM.vst3 RetroNovelFM-vst.dll RetroNovelFM.clap
       - uses: actions/upload-artifact@v4
         with:
           name: RetroNovelFM-Windows-x64
-          path: |
-            bin/RetroNovelFM.vst3
-            bin/RetroNovelFM-vst.dll
-            bin/RetroNovelFM.clap
+          path: RetroNovelFM-Windows-x64.zip
 
   macos:
     runs-on: macos-15
@@ -40,14 +47,12 @@ jobs:
           git -C dpf submodule update --init --recursive
       - name: Build macOS universal
         run: make MACOS_UNIVERSAL=true -j4
+      - name: Zip
+        run: cd bin && zip -r ../RetroNovelFM-macOS.zip RetroNovelFM.vst3 RetroNovelFM.vst RetroNovelFM.clap RetroNovelFM.component
       - uses: actions/upload-artifact@v4
         with:
           name: RetroNovelFM-macOS
-          path: |
-            bin/RetroNovelFM.vst3
-            bin/RetroNovelFM.vst
-            bin/RetroNovelFM.clap
-            bin/RetroNovelFM.component
+          path: RetroNovelFM-macOS.zip
 
   linux:
     runs-on: ubuntu-24.04
@@ -60,10 +65,29 @@ jobs:
           git -C dpf submodule update --init --recursive
       - name: Build Linux x64
         run: make -j4
+      - name: Zip
+        run: cd bin && zip -r ../RetroNovelFM-Linux-x64.zip RetroNovelFM.vst3 RetroNovelFM-vst.so RetroNovelFM.clap
       - uses: actions/upload-artifact@v4
         with:
           name: RetroNovelFM-Linux-x64
-          path: |
-            bin/RetroNovelFM.vst3
-            bin/RetroNovelFM-vst.so
-            bin/RetroNovelFM.clap
+          path: RetroNovelFM-Linux-x64.zip
+
+  release:
+    needs: [windows, macos, linux]
+    if: always() && needs.windows.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release "latest"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -la dist
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest dist/*.zip --target ${{ github.sha }} --title "Retro Novel FM (latest build)" --notes "Windows: RetroNovelFM.vst3 -> C:\\Program Files\\Common Files\\VST3. Подробности в README."
