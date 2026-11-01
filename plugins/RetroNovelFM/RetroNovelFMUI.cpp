@@ -2,6 +2,8 @@
 #include "DistrhoUI.hpp"
 #include "RetroData.hpp"
 #include "RetroCharacters.hpp"
+#include "pixelart/PixelArt.hpp"
+#include <vector>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -58,6 +60,9 @@ public:
         buildLayout();
        #ifdef RETRO_SCREENSHOT
         if (std::getenv("RETRO_EDITOR")) { fEditor = true; fEditUser = 0; }
+        if (const char* e = std::getenv("RETRO_EXPORT")) { fExport = true; fExportGirl = std::strcmp(e, "girl") == 0; }
+        if (const char* e = std::getenv("RETRO_FRAME")) { const int f = std::atoi(e); fForceBlink = f == 1 ? 1 : 0; fForceMouth = f == 2 ? 1 : 0; }
+        if (const char* e = std::getenv("RETRO_BG")) fExportWhite = std::atoi(e) == 1;
         if (const char* e = std::getenv("RETRO_TAB")) fEraTab = std::atoi(e);
         if (std::getenv("RETRO_SMP")) { fSmpPath[0] = "C:\\Music\\vn_piano_C4.wav"; fSmpPath[2] = "/home/me/rpgxp/Audio/SE/bell.ogg"; fRoot[2] = 72; }
         if (const char* e = std::getenv("RETRO_INST")) { const float v = (float)std::atoi(e); parameterChanged(pInstrument, v); setParameterValue(pInstrument, v); fSwitchT = -10; fTypeT = -10; }
@@ -79,7 +84,7 @@ protected:
         {
             const int ni = clampi((int)std::lround(value), 0, kNumInstruments - 1);
             const int oi = clampi((int)std::lround(fParams[pInstrument]), 0, kNumInstruments - 1);
-            if (ni != oi || !fInited) { fPrevChar = kFlavor[oi].ch; fSwitchT = now(); fTypeT = now(); fEraTab = eraOf(ni); }
+            if (ni != oi || !fInited) { fPrevChar = kFlavor[oi].ch; fPrevPixel = eraOf(oi) == eraPC98; fSwitchT = now(); fTypeT = now(); fEraTab = eraOf(ni); }
             fInited = true;
         }
         fParams[index] = value;
@@ -108,25 +113,57 @@ protected:
         save();
         scale(sc, sc);
 
+        // "Live2D" look target: follow the cursor, otherwise wander softly
+        {
+            float tx, ty;
+            if (fT - fMouseT < 4.f && fMouseX >= 0) { tx = (fMouseX - 480.f) / 380.f; ty = (fMouseY - 230.f) / 300.f; }
+            else { tx = std::sin(fT * 0.31f) * 0.35f; ty = std::sin(fT * 0.23f) * 0.2f; }
+            tx = std::fmax(-1.f, std::fmin(1.f, tx)); ty = std::fmax(-1.f, std::fmin(1.f, ty));
+            const float dt = std::fmin(0.1f, std::fmax(0.001f, fT - fLastFrameT));
+            const float k = 1.f - std::exp(-dt * 5.f);
+            fLX += (tx - fLX) * k; fLY += (ty - fLY) * k;
+            fLastFrameT = fT;
+            if (fExport) { fLX = fLY = 0; fT = 0; }
+           #ifdef RETRO_SCREENSHOT
+            if (const char* e = std::getenv("RETRO_LOOK")) { fLX = (float)std::atof(e); fLY = 0.1f; }
+           #endif
+        }
+
         const int inst = clampi((int)std::lround(fParams[pInstrument]), 0, kNumInstruments - 1);
         const int ch = kFlavor[inst].ch;
         const CharacterDef& C = kChars[ch];
+
+        // offline export used to build the PC-98 pixel art (tools/build_pixelart.py)
+        if (fExport)
+        {
+            if (fExportGirl)
+            {
+                beginPath(); rect(0, 0, kW, kH); fillColor(fExportWhite ? Color(255, 255, 255) : Color(0, 0, 0)); fill();
+                drawHeroine(C, 480.f, 1.f);
+            }
+            else drawScene(C, 1.f);
+            restore();
+            return;
+        }
         const float sw = std::fmin(1.f, (fT - fSwitchT) / 0.45f);
 
-        // background: crossfade scenes when the heroine changes
-        drawScene(kChars[fPrevChar], 1.f);
-        if (sw < 1.f) { globalAlpha(sw); drawScene(C, sw); globalAlpha(1.f); }
-        else drawScene(C, 1.f);
-
-        // heroine
+        // PC-98 era = pixel art, Windows XP era = detailed 2000s style
+        const bool pixel = eraOf(inst) == eraPC98;
+        fPixelUI = pixel;
         const float ease = 1.f - (1.f - sw) * (1.f - sw);
-        if (sw < 1.f && fPrevChar != ch) {
+        // background: crossfade scenes when the heroine (or era) changes
+        drawWorldBg(fPrevChar, fPrevPixel, 1.f);
+        if (sw < 1.f) { globalAlpha(sw); drawWorldBg(ch, pixel, sw); globalAlpha(1.f); }
+        else drawWorldBg(ch, pixel, 1.f);
+        // heroine
+        if (sw < 1.f && (fPrevChar != ch || fPrevPixel != pixel)) {
             globalAlpha(1.f - ease);
-            drawHeroine(kChars[fPrevChar], 480.f - 60.f * ease, 1.f);
+            drawWorldGirl(fPrevChar, fPrevPixel, 480.f - 60.f * ease);
         }
         globalAlpha(ease);
-        drawHeroine(C, 480.f + 60.f * (1.f - ease), ease);
+        drawWorldGirl(ch, pixel, 480.f + 60.f * (1.f - ease));
         globalAlpha(1.f);
+        if (pixel) drawScanlines();
 
         drawNotes(C);
         drawTopBar(C);
@@ -230,7 +267,7 @@ protected:
     {
         const float sc = getHeight() / kH;
         const float px = ev.pos.getX() / sc, py = ev.pos.getY() / sc;
-        fMouseX = px; fMouseY = py;
+        fMouseX = px; fMouseY = py; fMouseT = fT;
         if (fDrag >= 0)
         {
             const Control& c = fCtl[fDrag];
@@ -417,6 +454,7 @@ private:
     }
     void glassPanel(float x, float y, float w, float h, uint32_t accent, float r = 14.f)
     {
+        if (fPixelUI) r = 3.f;
         // drop shadow
         beginPath(); rect(x - 10, y - 6, w + 20, h + 22);
         fillPaint(boxGradient(x, y + 4, w, h, r, 14, Color(20, 10, 40, 0.28f), Color(0, 0, 0, 0)));
@@ -435,99 +473,268 @@ private:
     }
 
     // ================================================================== scene
+    // ================================================================== PC-98 pixel art
+    NanoImage& pxImage(int c, int frame)   // frame -1 = background
+    {
+        NanoImage& img = frame < 0 ? fPxBgImg[c] : fPxGirlImg[c][frame];
+        if (!img.isValid())
+        {
+            const PixelImage& P = frame < 0 ? kPxBg[c] : kPxGirl[c][frame];
+            std::vector<uint8_t> rgba((size_t)P.w * P.h * 4);
+            for (int i = 0; i < P.w * P.h; ++i)
+            {
+                const int v = (P.idx[i >> 1] >> ((i & 1) ? 0 : 4)) & 15;
+                rgba[i * 4 + 0] = P.pal[v * 3 + 0]; rgba[i * 4 + 1] = P.pal[v * 3 + 1]; rgba[i * 4 + 2] = P.pal[v * 3 + 2];
+                rgba[i * 4 + 3] = (P.transparent >= 0 && v == P.transparent) ? 0 : 255;
+            }
+            img = createImageFromRGBA((uint)P.w, (uint)P.h, rgba.data(), 1 << 5 /* NVG_IMAGE_NEAREST */);
+        }
+        return img;
+    }
+    void blit(NanoImage& img, float x, float y, float w, float h)
+    {
+        beginPath(); rect(x, y, w, h);
+        fillPaint(imagePattern(x, y, w, h, 0.f, img, 1.f)); fill();
+    }
+    static float snap(float v) { return std::floor(v / kPixelScale + 0.5f) * kPixelScale; }
+
+    void drawWorldBg(int c, bool pixel, float a)
+    {
+        if (!pixel) { drawScene(kChars[c], a); return; }
+        blit(pxImage(c, -1), 0, 0, kW, kH);
+        // pixel particles snapped to the 3px grid
+        const CharacterDef& C = kChars[c];
+        for (int i = 0; i < 40; ++i)
+        {
+            const float sp = 25.f + hash01(i + 900) * 35.f;
+            const float x = snap(std::fmod(hash01(i + 1000) * (kW + 200) + fT * 22.f + std::sin(fT * 0.9f + i) * 30.f, kW + 200) - 100);
+            const float y = snap(std::fmod(hash01(i + 1100) * (kH + 60) + fT * sp, kH + 60) - 30);
+            beginPath();
+            if (C.pt == ptSnow) { rect(x, y, 3, 3); fillColor(Color(255, 255, 255)); }
+            else if (C.pt == ptSparkle) { rect(x, y - 3, 3, 9); rect(x - 3, y, 9, 3); fillColor(Color(255, 240, 170, std::sin(fT * 4 + i) > 0 ? 1.f : 0.5f)); }
+            else { const bool wide = std::sin(fT * 2.f + i) > 0; rect(x, y, wide ? 6.f : 3.f, wide ? 3.f : 6.f); fillColor(hexc(C.particle)); }
+            fill();
+        }
+    }
+    void drawWorldGirl(int c, bool pixel, float cx)
+    {
+        if (!pixel) { drawHeroine(kChars[c], cx, 1.f); return; }
+        const float act = fParams[pOutActivity], beat = fParams[pOutBeat];
+        const float bt = std::fmod(fT + 0.37f * c, 4.3f);
+        int frame = 0;
+        if (bt > 4.15f || (act > 0.35f && std::fmod(fT, 2.5f) < 0.6f)) frame = 1;
+        else if (act > 0.03f && std::sin(fT * 13.f) > 0.f) frame = 2;
+        const PixelImage& P = kPxGirl[c][frame];
+        const float x = snap(P.x * kPixelScale + (cx - 480.f) + fLX * 4.f);
+        const float y = snap(P.y * kPixelScale + (std::sin(fT * 2.1f) > 0.6f ? -3.f : 0.f) + beat * beat * 6.f);
+        blit(pxImage(c, frame), x, y, (float)P.w * kPixelScale, (float)P.h * kPixelScale);
+    }
+    void drawScanlines()
+    {
+        beginPath();
+        for (int r = 0; r < (int)(kH / kPixelScale); ++r) rect(0, r * kPixelScale + 2, kW, 1);
+        fillColor(Color(0, 0, 0, 0.07f)); fill();
+    }
+
+    // parallax helper: deeper layers move less when she (and the camera) turns
+    void layer(float depth) { translate(-fLX * depth, -fLY * depth * 0.35f); }
+
+    void cloud(const CharacterDef& C, float x, float y, float s, float al)
+    {
+        // shaded cumulus: shadow underside, body, sunlit top
+        fillColor(mixc(C.skyBottom, 0x8890b0, 0.45f, al * 0.6f));
+        beginPath(); ellipse(x + 4 * s, y + 10 * s, 78 * s, 20 * s); ellipse(x - 44 * s, y + 12 * s, 40 * s, 13 * s); fill();
+        fillColor(Color(255, 255, 255, al));
+        beginPath();
+        ellipse(x, y, 72 * s, 22 * s); ellipse(x - 42 * s, y + 6 * s, 44 * s, 16 * s);
+        ellipse(x + 44 * s, y + 4 * s, 50 * s, 18 * s); ellipse(x + 6 * s, y - 16 * s, 42 * s, 24 * s); ellipse(x - 22 * s, y - 10 * s, 28 * s, 18 * s);
+        fill();
+        fillColor(Color(255, 255, 255, al * 0.9f));
+        beginPath(); ellipse(x + 2 * s, y - 22 * s, 26 * s, 10 * s); fill();
+    }
+
     void drawScene(const CharacterDef& C, float /*a*/)
     {
+        const bool night = C.ce == ceMoon || C.ce == ceRedMoon;
         // sky
-        beginPath(); rect(0, 0, kW, kH);
+        beginPath(); rect(-40, -40, kW + 80, kH + 80);
         fillPaint(linearGradient(0, 0, 0, 470, hexc(C.skyTop), hexc(C.skyBottom)));
         fill();
+        // horizon haze
+        beginPath(); rect(-40, 220, kW + 80, 200);
+        fillPaint(linearGradient(0, 220, 0, 400, hexc(C.skyBottom, 0.f), mixc(C.skyBottom, 0xffffff, 0.35f, night ? 0.15f : 0.6f))); fill();
 
+        save(); layer(4.f);
         // stars for night / sparkles for dusk
-        if (C.ce == ceMoon || C.ce == ceRedMoon || C.pt == ptSparkle)
+        if (night || C.pt == ptSparkle)
         {
-            for (int i = 0; i < 70; ++i)
+            for (int i = 0; i < 90; ++i)
             {
                 const float x = hash01(i * 3 + 1) * kW, y = hash01(i * 3 + 2) * 330.f;
-                const float tw = 0.45f + 0.55f * std::sin(fT * (1.2f + hash01(i) * 2.f) + i);
+                const float tw = fExport ? 1.f : 0.45f + 0.55f * std::sin(fT * (1.2f + hash01(i) * 2.f) + i);
                 beginPath(); circle(x, y, 0.8f + hash01(i * 7) * 1.4f);
-                fillColor(Color(255, 255, 240, (C.ce == ceMoon || C.ce == ceRedMoon ? 0.85f : 0.45f) * tw)); fill();
+                fillColor(Color(255, 255, 240, (night ? 0.85f : 0.45f) * tw)); fill();
             }
         }
-        // sun / moon
-        if (C.ce == ceSun)
+        // sun / moon with glow and light rays
+        float sunX = -1, sunY = -1;
+        if (C.ce == ceSun) { sunX = 800; sunY = 96; }
+        else if (C.ce == ceSunset) { sunX = 250; sunY = 360; }
+        if (sunX >= 0)
         {
-            beginPath(); circle(800, 96, 140);
-            fillPaint(radialGradient(800, 96, 20, 140, Color(255, 255, 230, 0.9f), Color(255, 255, 230, 0.f))); fill();
-            beginPath(); circle(800, 96, 34); fillColor(Color(255, 255, 240, 0.95f)); fill();
-        }
-        else if (C.ce == ceSunset)
-        {
-            beginPath(); circle(250, 360, 230);
-            fillPaint(radialGradient(250, 360, 40, 230, Color(255, 230, 160, 0.85f), Color(255, 160, 120, 0.f))); fill();
-            beginPath(); circle(250, 360, 62); fillColor(Color(255, 236, 190, 0.95f)); fill();
+            const float big = C.ce == ceSunset ? 1.6f : 1.f;
+            // rays
+            save(); translate(sunX, sunY); rotate(fExport ? 0.f : fT * 0.02f);
+            for (int k = 0; k < 9; ++k)
+            {
+                const float a = k * 0.698f + hash01(k + 77) * 0.3f, w = 0.06f + hash01(k + 90) * 0.07f;
+                beginPath(); moveTo(0, 0); lineTo(std::cos(a - w) * 900, std::sin(a - w) * 900); lineTo(std::cos(a + w) * 900, std::sin(a + w) * 900); closePath();
+                fillPaint(radialGradient(0, 0, 40, 700, Color(255, 250, 220, C.ce == ceSunset ? 0.16f : 0.11f), Color(255, 250, 220, 0.f))); fill();
+            }
+            restore();
+            beginPath(); circle(sunX, sunY, 170 * big);
+            fillPaint(radialGradient(sunX, sunY, 20, 170 * big, C.ce == ceSunset ? Color(255, 225, 160, 0.9f) : Color(255, 255, 235, 0.95f), Color(255, 220, 170, 0.f))); fill();
+            beginPath(); circle(sunX, sunY, C.ce == ceSunset ? 62.f : 34.f); fillColor(C.ce == ceSunset ? Color(255, 238, 195, 0.97f) : Color(255, 255, 245, 0.97f)); fill();
         }
         else if (C.ce == ceMoon)
         {
-            beginPath(); circle(790, 110, 110);
-            fillPaint(radialGradient(790, 110, 30, 110, Color(220, 230, 255, 0.5f), Color(200, 210, 255, 0.f))); fill();
-            beginPath(); circle(790, 110, 38); fillColor(Color(250, 248, 230)); fill();
+            beginPath(); circle(790, 110, 130);
+            fillPaint(radialGradient(790, 110, 30, 130, Color(220, 230, 255, 0.5f), Color(200, 210, 255, 0.f))); fill();
+            beginPath(); circle(790, 110, 38); fillPaint(radialGradient(780, 100, 5, 40, Color(255, 255, 245), Color(235, 232, 210))); fill();
             beginPath(); circle(774, 100, 34); fillColor(hexc(C.skyTop, 0.92f)); fill();
         }
         else if (C.ce == ceRedMoon)
         {
-            beginPath(); circle(790, 120, 150);
-            fillPaint(radialGradient(790, 120, 30, 150, Color(255, 60, 70, 0.45f), Color(160, 0, 30, 0.f))); fill();
+            beginPath(); circle(790, 120, 170);
+            fillPaint(radialGradient(790, 120, 30, 170, Color(255, 60, 70, 0.45f), Color(160, 0, 30, 0.f))); fill();
             beginPath(); circle(790, 120, 46); fillPaint(radialGradient(780, 110, 5, 50, Color(255, 170, 160), Color(200, 30, 50))); fill();
             beginPath(); ellipse(800, 128, 9, 6); ellipse(774, 108, 6, 5); fillColor(Color(150, 20, 40, 0.45f)); fill();
         }
-        // clouds
-        if (C.ce != ceMoon && C.ce != ceRedMoon)
+        restore();
+
+        // clouds (shaded)
+        if (!night)
         {
-            for (int i = 0; i < 5; ++i)
+            save(); layer(8.f);
+            const float al = C.ce == ceCloudy ? 0.85f : 0.75f;
+            for (int i = 0; i < 6; ++i)
             {
-                float x = std::fmod(hash01(i + 40) * 1300.f + fT * (6.f + i * 2.f), 1300.f) - 170.f;
-                const float y = 60.f + hash01(i + 60) * 200.f, s = 0.7f + hash01(i + 80) * 0.7f;
-                const float al = C.ce == ceCloudy ? 0.75f : 0.55f;
-                fillColor(Color(255, 255, 255, al));
-                beginPath();
-                ellipse(x, y, 70 * s, 22 * s); ellipse(x - 40 * s, y + 6 * s, 44 * s, 16 * s);
-                ellipse(x + 42 * s, y + 4 * s, 50 * s, 18 * s); ellipse(x + 8 * s, y - 14 * s, 40 * s, 22 * s);
-                fill();
+                const float x = std::fmod(hash01(i + 40) * 1300.f + (fExport ? 0.f : fT) * (6.f + i * 2.f), 1300.f) - 170.f;
+                const float y = 60.f + hash01(i + 60) * 200.f, sc2 = 0.7f + hash01(i + 80) * 0.8f;
+                cloud(C, x, y, sc2, al);
+            }
+            restore();
+        }
+
+        // far hills
+        save(); layer(10.f);
+        beginPath(); moveTo(-40, 330);
+        for (int k = 0; k <= 12; ++k) { const float x = -40 + k * 90.f; quadTo(x + 45, 285 + hash01(k + 300) * 40, x + 90, 320 + hash01(k + 320) * 15); }
+        lineTo(kW + 60, 420); lineTo(-40, 420); closePath();
+        fillColor(mixc(C.skyBottom, C.horizon, 0.55f, 0.75f)); fill();
+        restore();
+
+        // city: two-tone buildings with windows
+        save(); layer(13.f);
+        for (int i = 0; i < 24; ++i)
+        {
+            const float bw = 30 + hash01(i + 100) * 50, bh = 40 + hash01(i + 120) * 120;
+            const float bx = i * 44.f - 40 + hash01(i + 140) * 10;
+            const Color face = mixc(C.horizon, 0x2a2440, 0.32f + hash01(i) * 0.15f, 0.82f);
+            const Color side = mixc(C.horizon, 0x2a2440, 0.5f + hash01(i) * 0.15f, 0.85f);
+            beginPath(); rect(bx, 400 - bh, bw * 0.75f, bh + 80); fillColor(face); fill();
+            beginPath(); rect(bx + bw * 0.75f, 400 - bh + 4, bw * 0.25f, bh + 80); fillColor(side); fill();
+            beginPath(); rect(bx - 2, 400 - bh - 3, bw * 0.75f + 4, 4); fillColor(mixc(C.horizon, 0x2a2440, 0.55f, 0.85f)); fill();
+            for (int w = 0; w < 10; ++w)
+            {
+                const float wx = bx + 5 + (w % 3) * (bw * 0.22f), wy = 400 - bh + 10 + (w / 3) * 15;
+                if (wy > 395) break;
+                const bool lit = night || C.ce == ceSunset ? hash01(i * 13 + w) > 0.45f : false;
+                beginPath(); rect(wx, wy, 5, 7);
+                fillColor(lit ? Color(255, 228, 150, 0.85f) : mixc(C.skyBottom, 0x40506a, 0.4f, 0.55f)); fill();
             }
         }
-        // distant city
-        for (int i = 0; i < 22; ++i)
+        restore();
+
+        // utility poles and power lines - a staple of 2000s VN backgrounds
+        save(); layer(18.f);
         {
-            const float bw = 30 + hash01(i + 100) * 50, bh = 40 + hash01(i + 120) * 110;
-            const float bx = i * 46.f - 20 + hash01(i + 140) * 10;
-            beginPath(); rect(bx, 400 - bh, bw, bh + 80);
-            fillColor(mixc(C.horizon, 0x2a2440, 0.35f + hash01(i) * 0.15f, 0.55f)); fill();
-            if (C.ce == ceMoon || C.ce == ceSunset || C.ce == ceRedMoon)
-                for (int w = 0; w < 6; ++w)
+            const Color wire = mixc(C.horizon, 0x101018, 0.75f, 0.85f);
+            const float px1 = 118, px2 = 852;
+            for (int pi = 0; pi < 2; ++pi)
+            {
+                const float px = pi ? px2 : px1;
+                beginPath(); rect(px - 5, 40, 10, 300); fillColor(wire); fill();
+                beginPath(); rect(px - 46, 70, 92, 6); rect(px - 34, 100, 68, 5); fill();
+                for (int k = 0; k < 3; ++k) { beginPath(); rect(px - 40 + k * 38, 62, 5, 9); fill(); }
+            }
+            strokeColor(wire); strokeWidth(1.6f);
+            static const float yy[4] = { 66, 66, 66, 98 };
+            static const float xo[4] = { -40, -2, 36, -30 };
+            for (int k = 0; k < 4; ++k)
+            {
+                const float y0 = yy[k];
+                beginPath(); moveTo(px1 + xo[k] + 2, y0); bezierTo(px1 + 250, y0 + 70, px2 - 250, y0 + 70, px2 + xo[k] + 2, y0); stroke();
+                beginPath(); moveTo(-60, y0 + 40); quadTo(40, y0 + 55, px1 + xo[k] + 2, y0); stroke();
+                beginPath(); moveTo(px2 + xo[k] + 2, y0); quadTo(px2 + 70, y0 + 50, kW + 60, y0 + 38); stroke();
+            }
+            // a bird or two on the wire
+            if (!night)
+                for (int b = 0; b < 2; ++b)
                 {
-                    if (hash01(i * 13 + w) < 0.45f) continue;
-                    beginPath(); rect(bx + 6 + (w % 2) * (bw * 0.45f), 400 - bh + 10 + (w / 2) * 16, 6, 7);
-                    fillColor(Color(255, 230, 150, 0.75f)); fill();
+                    const float bx = 330 + b * 37, by = 66 + 70 * 0.75f * 0.75f + 2;
+                    beginPath(); ellipse(bx, by - 5, 6, 4.5f); circle(bx + 5, by - 9, 3); fillColor(wire); fill();
                 }
         }
+        restore();
+
         // rooftop floor + fence
-        beginPath(); rect(0, 400, kW, 260);
+        save(); layer(22.f);
+        beginPath(); rect(-60, 400, kW + 120, 300);
         fillPaint(linearGradient(0, 400, 0, 660, mixc(C.horizon, 0x6a6f88, 0.5f), mixc(C.horizon, 0x2d2a3c, 0.7f)));
         fill();
-        strokeColor(mixc(C.horizon, 0x303040, 0.65f, 0.8f));
+        strokeColor(mixc(C.horizon, 0x303040, 0.65f, 0.85f));
         strokeWidth(5.f);
-        beginPath(); moveTo(0, 318); lineTo(kW, 318); stroke();
-        beginPath(); moveTo(0, 398); lineTo(kW, 398); stroke();
+        beginPath(); moveTo(-60, 318); lineTo(kW + 60, 318); stroke();
+        beginPath(); moveTo(-60, 398); lineTo(kW + 60, 398); stroke();
         strokeWidth(2.5f);
-        for (int i = 0; i < 49; ++i) { beginPath(); moveTo(i * 20.f, 318); lineTo(i * 20.f, 398); stroke(); }
+        for (int i = -3; i < 52; ++i) { beginPath(); moveTo(i * 20.f, 318); lineTo(i * 20.f, 398); stroke(); }
         strokeWidth(1.f);
         strokeColor(mixc(C.horizon, 0x303040, 0.6f, 0.35f));
-        for (int i = 0; i < 24; ++i) { beginPath(); moveTo(i * 40.f, 318); lineTo(i * 40.f + 40.f, 398); stroke(); }
+        for (int i = -2; i < 26; ++i) { beginPath(); moveTo(i * 40.f, 318); lineTo(i * 40.f + 40.f, 398); stroke(); }
+        // fence highlight from the sky light
+        strokeWidth(1.5f); strokeColor(mixc(C.skyBottom, 0xffffff, 0.4f, night ? 0.15f : 0.45f));
+        beginPath(); moveTo(-60, 316); lineTo(kW + 60, 316); stroke();
+        // street lamps glow at night
+        if (night)
+            for (int k = 0; k < 3; ++k)
+            {
+                const float lx2 = 200 + k * 290;
+                beginPath(); circle(lx2, 300, 60);
+                fillPaint(radialGradient(lx2, 300, 4, 60, Color(255, 220, 160, 0.55f), Color(255, 200, 140, 0.f))); fill();
+                beginPath(); circle(lx2, 300, 5); fillColor(Color(255, 245, 220)); fill();
+            }
+        restore();
+
+        // lens flare (daylight)
+        if (C.ce == ceSun && !fExport)
+        {
+            const float cx2 = 480 - fLX * 30, cy2 = 330;
+            for (int k = 1; k <= 4; ++k)
+            {
+                const float t = k / 5.f, fxp = sunX + (cx2 - sunX) * t * 1.4f, fyp = sunY + (cy2 - sunY) * t * 1.4f;
+                beginPath(); circle(fxp, fyp, 10 + k * 7);
+                fillColor(k % 2 ? Color(255, 230, 200, 0.08f) : Color(200, 230, 255, 0.07f)); fill();
+            }
+        }
 
         // trees (sakura / maple / snowy / green) in the corners
+        save(); layer(30.f);
         drawBranch(C, -20.f, -10.f, 1.f);
         drawBranch(C, kW + 20.f, -10.f, -1.f);
+        restore();
 
+        if (fExport) return;
         // falling particles
         for (int i = 0; i < 46; ++i) drawParticle(C, i);
 
@@ -652,28 +859,33 @@ private:
     {
         const float act = fParams[pOutActivity];
         const float beat = fParams[pOutBeat];
-        const float breathe = std::sin(fT * 2.1f) * 2.2f;
-        const float bob = beat * beat * 5.f;
+        const float breathe = fExport ? 0.f : std::sin(fT * 2.1f) * 2.2f;
+        const float bob = fExport ? 0.f : beat * beat * 5.f;
         const float u = 92.f;               // pixels per head-radius
         const float cy = 214.f + breathe * 0.4f + bob;
+        const float lx = fLX, ly = fLY;    // where she looks (-1..1), drives the "Live2D" turn
 
         save();
         translate(cx, cy);
         scale(u, u);
-        const float sway = std::sin(fT * 0.9f) * 0.012f + (act > 0.05f ? std::sin(fT * 3.f) * 0.02f * std::fmin(1.f, act * 2) : 0.f);
+        const float sway = fExport ? 0.f : std::sin(fT * 0.9f) * 0.012f + (act > 0.05f ? std::sin(fT * 3.f) * 0.02f * std::fmin(1.f, act * 2) : 0.f);
+        fHairSway = fExport ? 0.f : std::sin(fT * 1.4f) * 0.035f - lx * 0.05f;
 
-        // ---- back layer: hair behind body
+        // ---- back layer: hair behind body moves opposite to the face (depth)
+        save(); translate(-lx * 0.05f, -ly * 0.02f);
         drawBackHair(C);
+        restore();
 
         // ---- body
         save();
-        translate(0, breathe * 0.004f);
+        translate(lx * 0.015f, breathe * 0.004f);
         drawBody(C);
         restore();
 
-        // ---- head (sways slightly)
+        // ---- head: turns towards the cursor
         save();
-        translate(0, 0.7f); rotate(sway); translate(0, -0.7f);
+        translate(0, 0.7f); rotate(sway + lx * 0.035f); translate(0, -0.7f);
+        translate(lx * 0.03f, ly * 0.02f);
         drawHairBehindHead(C);
         drawFace(C, act);
         drawFrontHair(C);
@@ -697,23 +909,23 @@ private:
         case hsLong:
         case hsHime:
             beginPath();
-            moveTo(-0.6f, -0.95f);
+            moveTo(-0.6f, -0.78f);
             bezierTo(-1.15f, -0.75f, -1.22f, 0.2f, -1.3f, 1.1f);
             bezierTo(-1.38f, 1.9f, -1.45f, 2.4f, -1.5f, 2.9f);
             lineTo(1.5f, 2.9f);
             bezierTo(1.45f, 2.4f, 1.38f, 1.9f, 1.3f, 1.1f);
-            bezierTo(1.22f, 0.2f, 1.15f, -0.75f, 0.6f, -0.95f);
+            bezierTo(1.22f, 0.2f, 1.15f, -0.75f, 0.6f, -0.78f);
             closePath();
             fillPaint(hairPaint(C, -0.4f, 2.9f)); fill(); hairStroke(C);
             break;
         case hsWavy:
             beginPath();
-            moveTo(-0.6f, -0.95f);
+            moveTo(-0.6f, -0.78f);
             bezierTo(-1.2f, -0.7f, -1.1f, 0.6f, -1.45f, 1.4f);
             bezierTo(-1.75f, 1.9f, -1.3f, 2.3f, -1.6f, 2.9f);
             lineTo(1.6f, 2.9f);
             bezierTo(1.3f, 2.3f, 1.75f, 1.9f, 1.45f, 1.4f);
-            bezierTo(1.1f, 0.6f, 1.2f, -0.7f, 0.6f, -0.95f);
+            bezierTo(1.1f, 0.6f, 1.2f, -0.7f, 0.6f, -0.78f);
             closePath();
             fillPaint(hairPaint(C, -0.4f, 2.9f)); fill(); hairStroke(C);
             break;
@@ -729,8 +941,8 @@ private:
                 closePath();
                 fillPaint(hairPaint(C, -0.7f, 1.6f)); fill(); hairStroke(C);
             }
-            beginPath(); moveTo(-0.55f, -0.95f); bezierTo(-1.15f, -0.7f, -1.05f, 0.6f, -0.75f, 0.9f); lineTo(0.75f, 0.9f);
-            bezierTo(1.05f, 0.6f, 1.15f, -0.7f, 0.55f, -0.95f); closePath();
+            beginPath(); moveTo(-0.55f, -0.78f); bezierTo(-1.15f, -0.7f, -1.05f, 0.6f, -0.75f, 0.9f); lineTo(0.75f, 0.9f);
+            bezierTo(1.05f, 0.6f, 1.15f, -0.7f, 0.55f, -0.78f); closePath();
             fillPaint(hairPaint(C, -0.3f, 0.9f)); fill(); hairStroke(C);
             break;
         case hsPonytail:
@@ -742,16 +954,16 @@ private:
             bezierTo(1.2f + sw, 0.6f, 1.05f, 0.2f, 0.95f, -0.2f);
             closePath();
             fillPaint(hairPaint(C, -1.0f, 1.4f)); fill(); hairStroke(C);
-            beginPath(); moveTo(-0.55f, -0.95f); bezierTo(-1.12f, -0.7f, -1.0f, 0.5f, -0.7f, 0.95f); lineTo(0.7f, 0.95f);
-            bezierTo(1.0f, 0.5f, 1.12f, -0.7f, 0.55f, -0.95f); closePath();
+            beginPath(); moveTo(-0.55f, -0.78f); bezierTo(-1.12f, -0.7f, -1.0f, 0.5f, -0.7f, 0.95f); lineTo(0.7f, 0.95f);
+            bezierTo(1.0f, 0.5f, 1.12f, -0.7f, 0.55f, -0.78f); closePath();
             fillPaint(hairPaint(C, -0.3f, 0.95f)); fill(); hairStroke(C);
             break;
         }
         case hsBob:
         case hsBraids:
         case hsBun:
-            beginPath(); moveTo(-0.55f, -0.95f); bezierTo(-1.2f, -0.7f, -1.12f, 0.75f, -0.82f, 1.02f); lineTo(0.82f, 1.02f);
-            bezierTo(1.12f, 0.75f, 1.2f, -0.7f, 0.55f, -0.95f); closePath();
+            beginPath(); moveTo(-0.55f, -0.78f); bezierTo(-1.2f, -0.7f, -1.12f, 0.75f, -0.82f, 1.02f); lineTo(0.82f, 1.02f);
+            bezierTo(1.12f, 0.75f, 1.2f, -0.7f, 0.55f, -0.78f); closePath();
             fillPaint(hairPaint(C, -0.4f, 1.0f)); fill(); hairStroke(C);
             break;
         }
@@ -930,63 +1142,73 @@ private:
 
     void drawFace(const CharacterDef& C, float act)
     {
-        const Color skin(255, 236, 224);
+        const Color skin(255, 239, 230), skinMid(252, 222, 210), skinSh(238, 186, 178);
+        const float fx = fLX * 0.07f, fy = fLY * 0.045f;   // facial features shift with the turn
         // face
         beginPath();
         moveTo(-0.84f, -0.2f);
-        bezierTo(-0.86f, 0.42f, -0.48f, 0.84f, 0.0f, 0.98f);
-        bezierTo(0.48f, 0.84f, 0.86f, 0.42f, 0.84f, -0.2f);
+        bezierTo(-0.86f + fx * 0.3f, 0.45f, -0.42f + fx * 0.5f, 0.86f, 0.0f + fx * 0.6f, 0.97f);
+        bezierTo(0.42f + fx * 0.5f, 0.86f, 0.86f + fx * 0.3f, 0.45f, 0.84f, -0.2f);
         bezierTo(0.84f, -1.0f, -0.84f, -1.0f, -0.84f, -0.2f);
         closePath();
-        fillPaint(radialGradient(0, 0.1f, 0.3f, 1.1f, skin, Color(250, 215, 200)));
+        fillPaint(radialGradient(fx * 2.f - 0.15f, 0.05f, 0.25f, 1.15f, skin, skinMid));
         fill();
-        strokeWidth(0.018f); strokeColor(Color(190, 130, 115, 0.8f)); stroke();
-        // ears
-        for (int s = -1; s <= 1; s += 2)
+        strokeWidth(0.016f); strokeColor(Color(196, 128, 116, 0.85f)); stroke();
+        // ears (the far one hides when she turns)
+        for (int s2 = -1; s2 <= 1; s2 += 2)
         {
-            beginPath(); ellipse(s * 0.84f, 0.18f, 0.09f, 0.16f); fillColor(Color(248, 214, 200)); fill();
+            const float vis = 1.f - std::fmax(0.f, -s2 * fLX) * 0.6f;
+            beginPath(); ellipse(s2 * 0.84f, 0.2f, 0.085f * vis, 0.15f); fillColor(Color(248, 210, 198)); fill();
+            beginPath(); ellipse(s2 * 0.85f, 0.21f, 0.04f * vis, 0.08f); fillColor(Color(232, 178, 168, 0.8f)); fill();
         }
-        // hair shadow on forehead
-        beginPath(); ellipse(0, -0.18f, 0.8f, 0.2f); fillColor(Color(220, 160, 160, 0.35f)); fill();
+        // soft side shading of the cheek opposite to the light
+        beginPath(); ellipse(0.62f + fx, 0.35f, 0.3f, 0.5f);
+        fillPaint(radialGradient(0.72f + fx, 0.35f, 0.05f, 0.4f, Color(240, 190, 180, 0.35f), Color(240, 190, 180, 0.f))); fill();
 
-        // blush
-        for (int s = -1; s <= 1; s += 2)
+        save(); translate(fx, fy);
+        // airbrushed blush + 2000s hatch lines
+        for (int s2 = -1; s2 <= 1; s2 += 2)
         {
-            beginPath(); ellipse(s * 0.5f, 0.46f, 0.16f, 0.065f);
-            fillColor(Color(255, 120, 140, 0.32f + 0.15f * std::fmin(1.f, act * 2))); fill();
-            strokeWidth(0.012f); strokeColor(Color(240, 110, 130, 0.5f));
-            for (int k = 0; k < 3; ++k) { beginPath(); moveTo(s * 0.43f + k * 0.06f, 0.43f); lineTo(s * 0.41f + k * 0.06f, 0.49f); stroke(); }
+            const float bx = s2 * 0.5f, by = 0.47f, ba = 0.38f + 0.2f * std::fmin(1.f, act * 2);
+            beginPath(); ellipse(bx, by, 0.24f, 0.13f);
+            fillPaint(radialGradient(bx, by, 0.02f, 0.22f, Color(255, 120, 140, ba), Color(255, 120, 140, 0.f))); fill();
+            strokeWidth(0.011f); strokeColor(Color(235, 100, 120, 0.55f));
+            for (int k = 0; k < 3; ++k) { beginPath(); moveTo(bx - 0.06f + k * 0.055f, by - 0.035f); lineTo(bx - 0.08f + k * 0.055f, by + 0.03f); stroke(); }
         }
 
         // eyes
         const float bt = std::fmod(fT + 0.37f * (float)(&C - kChars), 4.3f);
-        const bool blink = bt > 4.15f;
-        const bool happy = act > 0.35f && std::fmod(fT, 2.5f) < 0.6f;
-        for (int s = -1; s <= 1; s += 2) drawEye(C, s * 0.38f, 0.17f, (float)s, blink, happy);
+        const bool blink = fForceBlink >= 0 ? fForceBlink == 1 : bt > 4.15f;
+        const bool happy = fForceBlink < 0 && act > 0.35f && std::fmod(fT, 2.5f) < 0.6f;
+        for (int s2 = -1; s2 <= 1; s2 += 2) drawEye(C, s2 * 0.37f, 0.15f, (float)s2, blink, happy);
 
-        // brows
+        // brows (thin, slightly raised in 2000s style)
         lineCap(ROUND);
-        strokeWidth(0.03f); strokeColor(hexc(C.hairDark, 0.85f));
-        for (int s = -1; s <= 1; s += 2) { beginPath(); moveTo(s * 0.22f, -0.13f); quadTo(s * 0.38f, -0.2f, s * 0.54f, -0.15f); stroke(); }
+        strokeWidth(0.026f); strokeColor(mixc(C.hairDark, C.hair, 0.3f, 0.9f));
+        for (int s2 = -1; s2 <= 1; s2 += 2) { beginPath(); moveTo(s2 * 0.24f, -0.27f); quadTo(s2 * 0.38f, -0.32f, s2 * 0.52f, -0.28f); stroke(); }
 
-        // nose
-        strokeWidth(0.018f); strokeColor(Color(215, 150, 140));
-        beginPath(); moveTo(0.02f, 0.4f); lineTo(-0.01f, 0.45f); stroke();
+        // nose: tiny shadow + highlight
+        strokeWidth(0.016f); strokeColor(Color(214, 146, 136));
+        beginPath(); moveTo(0.025f, 0.4f); quadTo(0.035f, 0.44f, 0.005f, 0.455f); stroke();
+        beginPath(); circle(-0.025f, 0.41f, 0.012f); fillColor(Color(255, 255, 255, 0.7f)); fill();
 
         // mouth
-        const float open = act > 0.03f ? (0.5f + 0.5f * std::sin(fT * 13.f)) * std::fmin(1.f, act * 2.5f) : 0.f;
+        const float open = fForceMouth >= 0 ? (float)fForceMouth : (act > 0.03f ? (0.5f + 0.5f * std::sin(fT * 13.f)) * std::fmin(1.f, act * 2.5f) : 0.f);
         if (open > 0.08f)
         {
-            beginPath(); moveTo(-0.09f, 0.6f); quadTo(0, 0.6f + 0.02f, 0.09f, 0.6f); quadTo(0.06f, 0.66f + open * 0.1f, 0, 0.67f + open * 0.1f);
-            quadTo(-0.06f, 0.66f + open * 0.1f, -0.09f, 0.6f); closePath();
-            fillColor(Color(150, 40, 60)); fill();
-            beginPath(); ellipse(0, 0.65f + open * 0.08f, 0.045f, 0.02f + open * 0.02f); fillColor(Color(255, 130, 150)); fill();
+            beginPath(); moveTo(-0.085f, 0.6f); quadTo(0, 0.615f, 0.085f, 0.6f); quadTo(0.065f, 0.67f + open * 0.1f, 0, 0.68f + open * 0.1f);
+            quadTo(-0.065f, 0.67f + open * 0.1f, -0.085f, 0.6f); closePath();
+            fillColor(Color(160, 48, 70)); fill();
+            beginPath(); ellipse(0, 0.66f + open * 0.08f, 0.045f, 0.02f + open * 0.02f); fillColor(Color(255, 140, 160)); fill();
+            beginPath(); rect(-0.05f, 0.603f, 0.1f, 0.018f); fillColor(Color(255, 255, 255, 0.9f)); fill();
         }
         else
         {
-            strokeWidth(0.022f); strokeColor(Color(170, 70, 80));
-            beginPath(); moveTo(-0.08f, 0.61f); quadTo(0, 0.67f, 0.08f, 0.61f); stroke();
+            strokeWidth(0.02f); strokeColor(Color(178, 74, 86));
+            beginPath(); moveTo(-0.07f, 0.61f); quadTo(0, 0.665f, 0.07f, 0.61f); stroke();
         }
+        restore();
+        (void)skinSh;
     }
 
     void drawEye(const CharacterDef& C, float x, float y, float dir, bool blink, bool happy)
@@ -994,77 +1216,81 @@ private:
         save();
         translate(x, y); scale(dir, 1.f);
         lineCap(ROUND); lineJoin(ROUND);
-        const Color lash(40, 24, 30);
+        const Color lash = mixc(C.hairDark, 0x1a0c14, 0.6f);
         if (blink || happy)
         {
-            strokeWidth(0.045f); strokeColor(lash);
             beginPath();
-            if (happy) { moveTo(-0.18f, 0.08f); quadTo(0.0f, -0.12f, 0.2f, 0.06f); }
-            else       { moveTo(-0.19f, 0.03f); quadTo(0.0f, 0.12f, 0.21f, 0.0f); }
-            stroke();
+            if (happy) { moveTo(-0.2f, 0.09f); quadTo(0.0f, -0.13f, 0.23f, 0.06f); }
+            else       { moveTo(-0.21f, 0.04f); quadTo(0.0f, 0.14f, 0.24f, 0.0f); lineTo(0.3f, -0.03f); }
+            strokeWidth(0.045f); strokeColor(lash); stroke();
+            if (!happy) { strokeWidth(0.016f); beginPath(); moveTo(-0.1f, 0.1f); lineTo(-0.12f, 0.15f); moveTo(0.05f, 0.105f); lineTo(0.05f, 0.16f); moveTo(0.17f, 0.07f); lineTo(0.2f, 0.12f); stroke(); }
             restore();
             return;
         }
-        // sclera
-        beginPath(); moveTo(-0.19f, -0.02f); bezierTo(-0.12f, -0.2f, 0.12f, -0.2f, 0.21f, -0.06f);
-        bezierTo(0.22f, 0.12f, 0.12f, 0.24f, 0.0f, 0.24f); bezierTo(-0.14f, 0.24f, -0.21f, 0.12f, -0.19f, -0.02f); closePath();
+        // eye white
+        beginPath(); moveTo(-0.21f, 0.0f); bezierTo(-0.13f, -0.22f, 0.13f, -0.24f, 0.24f, -0.06f);
+        bezierTo(0.25f, 0.12f, 0.14f, 0.26f, 0.0f, 0.265f); bezierTo(-0.15f, 0.26f, -0.23f, 0.13f, -0.21f, 0.0f); closePath();
         fillColor(Color(255, 255, 255)); fill();
-        // iris
-        beginPath(); ellipse(0.01f, 0.06f, 0.14f, 0.18f);
-        fillPaint(linearGradient(0, -0.12f, 0, 0.24f, hexc(C.eyeDark), hexc(C.eye))); fill();
-        beginPath(); ellipse(0.01f, 0.07f, 0.075f, 0.1f); fillColor(mixc(C.eyeDark, 0x000000, 0.45f)); fill();
-        beginPath(); ellipse(0.01f, 0.17f, 0.09f, 0.045f); fillColor(mixc(C.eye, 0xffffff, 0.5f, 0.55f)); fill();
+        // shadow of the upper lid on the white
+        beginPath(); moveTo(-0.21f, 0.0f); bezierTo(-0.13f, -0.22f, 0.13f, -0.24f, 0.24f, -0.06f); lineTo(0.24f, 0.0f);
+        bezierTo(0.12f, -0.14f, -0.12f, -0.14f, -0.21f, 0.04f); closePath();
+        fillColor(Color(170, 180, 215, 0.55f)); fill();
+
+        // iris (follows the cursor)
+        const float ix = 0.012f + fLX * 0.04f * dir, iy = 0.075f + fLY * 0.03f;
+        beginPath(); ellipse(ix, iy, 0.15f, 0.2f);
+        fillPaint(linearGradient(0, iy - 0.2f, 0, iy + 0.2f, mixc(C.eyeDark, 0x000000, 0.2f), mixc(C.eye, 0xffffff, 0.15f))); fill();
+        strokeWidth(0.014f); strokeColor(mixc(C.eyeDark, 0x000000, 0.35f)); stroke();
+        // radial streaks
+        strokeWidth(0.007f); strokeColor(mixc(C.eye, 0xffffff, 0.4f, 0.35f));
+        for (int k = 0; k < 10; ++k)
+        {
+            const float a = k * 0.628f + 0.3f;
+            beginPath(); moveTo(ix + std::cos(a) * 0.06f, iy + std::sin(a) * 0.08f); lineTo(ix + std::cos(a) * 0.13f, iy + std::sin(a) * 0.17f); stroke();
+        }
+        // pupil + dark upper crescent
+        beginPath(); ellipse(ix, iy + 0.01f, 0.065f, 0.095f); fillColor(mixc(C.eyeDark, 0x000000, 0.55f)); fill();
+        beginPath(); ellipse(ix, iy - 0.1f, 0.14f, 0.09f); fillColor(mixc(C.eyeDark, 0x000000, 0.3f, 0.55f)); fill();
+        // lower glow
+        beginPath(); ellipse(ix, iy + 0.12f, 0.1f, 0.06f);
+        fillPaint(radialGradient(ix, iy + 0.13f, 0.01f, 0.1f, mixc(C.eye, 0xffffff, 0.65f, 0.85f), mixc(C.eye, 0xffffff, 0.4f, 0.f))); fill();
         // highlights
-        const float tw = 0.85f + 0.15f * std::sin(fT * 3.f);
-        beginPath(); ellipse(-0.05f, -0.01f, 0.05f, 0.055f); fillColor(Color(255, 255, 255, tw)); fill();
-        beginPath(); circle(0.07f, 0.14f, 0.022f); fillColor(Color(255, 255, 255, 0.85f)); fill();
-        // upper lash line with outer wing
-        beginPath(); moveTo(-0.21f, 0.0f); bezierTo(-0.12f, -0.21f, 0.12f, -0.22f, 0.24f, -0.06f); lineTo(0.3f, -0.1f); lineTo(0.25f, -0.01f);
-        strokeWidth(0.05f); strokeColor(lash); stroke();
-        strokeWidth(0.02f);
-        beginPath(); moveTo(0.22f, -0.07f); lineTo(0.31f, -0.04f); stroke();
-        // lower lash
-        strokeWidth(0.016f); strokeColor(Color(90, 50, 60, 0.8f));
-        beginPath(); moveTo(-0.12f, 0.23f); quadTo(0.02f, 0.27f, 0.15f, 0.2f); stroke();
+        const float tw = 0.88f + 0.12f * std::sin(fT * 3.f);
+        beginPath(); ellipse(ix - 0.06f, iy - 0.07f, 0.055f, 0.065f); fillColor(Color(255, 255, 255, tw)); fill();
+        beginPath(); circle(ix + 0.07f, iy + 0.08f, 0.024f); fillColor(Color(255, 255, 255, 0.9f)); fill();
+        beginPath(); circle(ix + 0.02f, iy - 0.1f, 0.012f); fillColor(Color(255, 255, 255, 0.8f)); fill();
+
+        // upper lash line: tapered filled shape with flicks at the outer corner
+        beginPath();
+        moveTo(-0.23f, 0.02f);
+        bezierTo(-0.14f, -0.22f, 0.13f, -0.25f, 0.26f, -0.07f);
+        lineTo(0.33f, -0.12f); lineTo(0.28f, -0.03f); lineTo(0.33f, -0.02f); lineTo(0.25f, 0.0f);
+        bezierTo(0.12f, -0.16f, -0.12f, -0.16f, -0.2f, 0.04f);
+        closePath();
+        fillColor(lash); fill();
+        // lid crease
+        strokeWidth(0.009f); strokeColor(mixc(C.hairDark, 0xd09080, 0.7f, 0.45f));
+        beginPath(); moveTo(-0.08f, -0.22f); quadTo(0.07f, -0.28f, 0.2f, -0.19f); stroke();
+        // lower lashes
+        strokeWidth(0.014f); strokeColor(mixc(C.hairDark, 0x804050, 0.5f, 0.85f));
+        beginPath(); moveTo(0.06f, 0.26f); quadTo(0.17f, 0.24f, 0.23f, 0.15f); stroke();
+        beginPath(); moveTo(-0.17f, 0.2f); lineTo(-0.12f, 0.24f); stroke();
         restore();
     }
 
-    void drawFrontHair(const CharacterDef& C)
+    void bangsPath(const CharacterDef& C, float dy)
     {
-        lineJoin(ROUND);
-        // side locks
-        if (C.hs != hsBraids)
-            for (int s = -1; s <= 1; s += 2)
-            {
-                const float len = (C.hs == hsHime) ? 0.85f : (C.hs == hsBob ? 0.95f : 1.25f);
-                beginPath();
-                moveTo(s * 0.72f, -0.45f);
-                bezierTo(s * 1.0f, 0.1f, s * 0.98f, len * 0.6f, s * 0.9f, len);
-                if (C.hs == hsHime) lineTo(s * 0.68f, len);
-                else bezierTo(s * 0.86f, len * 0.7f, s * 0.78f, len * 0.4f, s * 0.7f, len * 0.75f);
-                bezierTo(s * 0.72f, 0.3f, s * 0.68f, 0.0f, s * 0.6f, -0.3f);
-                closePath();
-                fillPaint(hairPaint(C, -0.45f, len)); fill(); hairStroke(C);
-            }
-
-        // cap + bangs
         beginPath();
-        moveTo(-0.92f, 0.05f);
-        bezierTo(-1.08f, -1.25f, 1.08f, -1.25f, 0.92f, 0.05f);
+        moveTo(-0.92f, 0.05f + dy);
+        bezierTo(-1.08f, -1.25f + dy, 1.08f, -1.25f + dy, 0.92f, 0.05f + dy);
         if (C.hs == hsHime)
         {
-            // straight-cut bangs
-            lineTo(0.86f, -0.02f); lineTo(0.7f, 0.04f);
-            for (int k = 0; k < 8; ++k)
-            {
-                const float x0 = 0.7f - k * 0.175f;
-                lineTo(x0 - 0.08f, -0.06f); lineTo(x0 - 0.175f, 0.03f);
-            }
+            lineTo(0.86f, -0.02f + dy); lineTo(0.7f, 0.04f + dy);
+            for (int k = 0; k < 8; ++k) { const float x0 = 0.7f - k * 0.175f; lineTo(x0 - 0.08f, -0.06f + dy); lineTo(x0 - 0.175f, 0.03f + dy); }
         }
         else
         {
             static const float pts[][4] = {
-                // control x,y then tip x,y   (right -> left)
                 { 0.88f, -0.2f, 0.74f, 0.16f }, { 0.66f, -0.1f, 0.58f, -0.08f },
                 { 0.55f, -0.05f, 0.44f, 0.1f }, { 0.38f, -0.12f, 0.3f, -0.12f },
                 { 0.26f, -0.02f, 0.14f, 0.12f }, { 0.06f, -0.15f, 0.0f, -0.12f },
@@ -1072,27 +1298,61 @@ private:
                 { -0.4f, 0.0f, -0.5f, 0.1f }, { -0.55f, -0.08f, -0.62f, -0.08f },
                 { -0.7f, 0.02f, -0.8f, 0.18f }, { -0.82f, -0.05f, -0.92f, 0.05f },
             };
-            for (const auto& p : pts) quadTo(p[0], p[1], p[2], p[3]);
+            for (const auto& p : pts) quadTo(p[0], p[1] + dy, p[2], p[3] + dy);
         }
         closePath();
-        fillPaint(linearGradient(0, -1.0f, 0, 0.1f, hexc(C.hair), mixc(C.hair, C.hairDark, 0.35f)));
-        fill(); hairStroke(C);
+    }
 
+    void drawFrontHair(const CharacterDef& C)
+    {
+        lineJoin(ROUND);
+        // cel shadow cast by the bangs onto the forehead
+        save(); translate(0.02f, 0.0f);
+        bangsPath(C, 0.075f);
+        fillColor(Color(232, 168, 162, 0.55f)); fill();
+        restore();
+        // side locks
+        if (C.hs != hsBraids)
+            for (int s = -1; s <= 1; s += 2)
+            {
+                const float len = (C.hs == hsHime) ? 0.85f : (C.hs == hsBob ? 0.95f : 1.25f);
+                const float sw = fHairSway * len;
+                beginPath();
+                moveTo(s * 0.72f, -0.45f);
+                bezierTo(s * 1.0f, 0.1f, s * 0.98f + sw * 0.5f, len * 0.6f, s * 0.9f + sw, len);
+                if (C.hs == hsHime) lineTo(s * 0.68f + sw, len);
+                else bezierTo(s * 0.86f + sw, len * 0.7f, s * 0.78f + sw * 0.5f, len * 0.4f, s * 0.7f + sw * 0.6f, len * 0.75f);
+                bezierTo(s * 0.72f, 0.3f, s * 0.68f, 0.0f, s * 0.6f, -0.3f);
+                closePath();
+                fillPaint(hairPaint(C, -0.45f, len)); fill(); hairStroke(C);
+            }
+
+        // cap + bangs
+        bangsPath(C, 0.f);
+        fillPaint(linearGradient(0, -1.0f, 0, 0.1f, mixc(C.hair, C.hairLight, 0.12f), mixc(C.hair, C.hairDark, 0.3f)));
+        fill(); strokeWidth(0.017f); strokeColor(hexc(C.hairDark, 0.95f)); stroke();
+        // darker strand wedges between the bangs (2000s cel shading)
+        static const float tips[6] = { 0.74f, 0.44f, 0.14f, -0.18f, -0.5f, -0.8f };
+        for (int k = 0; k < 6; ++k)
+        {
+            const float tx = tips[k];
+            beginPath(); moveTo(tx * 0.35f, -0.78f); quadTo(tx * 0.8f + 0.06f, -0.4f, tx + 0.08f, -0.02f); quadTo(tx * 0.8f, -0.35f, tx * 0.35f - 0.05f, -0.78f); closePath();
+            fillColor(hexc(C.hairDark, 0.28f)); fill();
+        }
         // strand lines
         strokeWidth(0.014f); strokeColor(hexc(C.hairDark, 0.45f));
         for (int k = -3; k <= 3; ++k) { beginPath(); moveTo(k * 0.12f, -0.85f); quadTo(k * 0.2f, -0.45f, k * 0.24f, -0.12f); stroke(); }
 
-        // angel ring highlight: soft glossy band broken by strands
-        for (int k = 0; k < 5; ++k)
-        {
-            const float a0 = 3.62f + k * 0.4f, a1 = a0 + 0.3f;
-            beginPath();
-            arc(0, -0.08f, 0.76f, a0, a1, CW);
-            arc(0, -0.08f, 0.66f, a1 - 0.02f, a0 + 0.02f, CCW);
-            closePath();
-            fillColor(hexc(C.hairLight, 0.55f)); fill();
-        }
-        beginPath(); ellipse(-0.3f, -0.7f, 0.1f, 0.03f); fillColor(Color(255, 255, 255, 0.55f)); fill();
+        // angel ring: smooth glossy crescent, cut by a few strand lines
+        beginPath();
+        arc(0, -0.1f, 0.74f, 3.75f, 5.68f, CW);
+        arc(0, -0.13f, 0.66f, 5.62f, 3.81f, CCW);
+        closePath();
+        fillPaint(linearGradient(0, -0.9f, 0, -0.6f, hexc(C.hairLight, 0.6f), hexc(C.hairLight, 0.15f)));
+        fill();
+        strokeWidth(0.016f); strokeColor(mixc(C.hair, C.hairDark, 0.4f, 0.7f));
+        for (int k = -3; k <= 3; ++k) { beginPath(); moveTo(k * 0.16f, -0.86f); lineTo(k * 0.19f, -0.7f); stroke(); }
+        beginPath(); ellipse(-0.28f, -0.76f, 0.09f, 0.022f); fillColor(Color(255, 255, 255, 0.6f)); fill();
     }
 
     void drawBraid(const CharacterDef& C, float s)
@@ -1235,7 +1495,7 @@ private:
             strokeWidth(1.5f); strokeColor(Color(255, 255, 255, 0.9f)); stroke();
             label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, c.label, 13.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
         }
-        label(940, 30, "v3.0", 11.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
+        label(940, 30, "v4.0", 11.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
     }
 
     void pill(const Box& b, bool sel, bool hv, uint32_t accent, float r = 11.f)
@@ -1345,16 +1605,22 @@ private:
     void drawTextbox(const CharacterDef& C, int inst)
     {
         const float x = 16, y = 456, w = 928, h = 76;
-        beginPath(); roundedRect(x, y, w, h, 12);
-        fillPaint(linearGradient(0, y, 0, y + h, Color(28, 22, 58, 0.86f), Color(50, 30, 80, 0.86f))); fill();
-        strokeWidth(2.f); strokeColor(hexc(C.accent, 0.9f)); stroke();
-        beginPath(); roundedRect(x + 5, y + 5, w - 10, h - 10, 9); strokeWidth(1.f); strokeColor(Color(255, 255, 255, 0.35f)); stroke();
+        const float rr = fPixelUI ? 0.f : 12.f;
+        beginPath(); roundedRect(x, y, w, h, rr);
+        if (fPixelUI) fillColor(Color(16, 16, 64, 0.93f));
+        else fillPaint(linearGradient(0, y, 0, y + h, Color(28, 22, 58, 0.86f), Color(50, 30, 80, 0.86f)));
+        fill();
+        strokeWidth(fPixelUI ? 3.f : 2.f); strokeColor(fPixelUI ? Color(255, 255, 255) : hexc(C.accent, 0.9f)); stroke();
+        beginPath(); roundedRect(x + 5, y + 5, w - 10, h - 10, fPixelUI ? 0.f : 9.f); strokeWidth(fPixelUI ? 3.f : 1.f);
+        strokeColor(fPixelUI ? hexc(C.accent) : Color(255, 255, 255, 0.35f)); stroke();
 
         // name plate
         char nm[96];
         std::snprintf(nm, sizeof(nm), "%s", C.name);
-        beginPath(); roundedRect(x + 18, y - 18, 190, 30, 10);
-        fillPaint(linearGradient(x + 18, 0, x + 208, 0, hexc(C.accent), mixc(C.accent, 0x8a5cff, 0.5f))); fill();
+        beginPath(); roundedRect(x + 18, y - 18, 190, 30, fPixelUI ? 0.f : 10.f);
+        if (fPixelUI) fillColor(hexc(C.accent));
+        else fillPaint(linearGradient(x + 18, 0, x + 208, 0, hexc(C.accent), mixc(C.accent, 0x8a5cff, 0.5f)));
+        fill();
         strokeWidth(2.f); strokeColor(Color(255, 255, 255)); stroke();
         outlinedLabel(x + 32, y + 3, nm, 17.f, Color(255, 255, 255), hexc(C.accent, 0.6f), ALIGN_LEFT | ALIGN_BASELINE, 1.2f);
         char role[96];
@@ -1518,6 +1784,12 @@ private:
     static constexpr int kMaxCtl = 320;
     Control fCtl[kMaxCtl];
     int fEraTab = 0, fLastPreset = 0, fEditUser = 0;
+    float fLX = 0, fLY = 0, fHairSway = 0, fMouseT = -100, fLastFrameT = 0;
+    int fForceBlink = -1, fForceMouth = -1;
+    bool fExport = false, fExportGirl = false, fExportWhite = false;
+    bool fPixelUI = true, fPrevPixel = true;
+    NanoImage fPxBgImg[kPxCount];
+    NanoImage fPxGirlImg[kPxCount][3];
     bool fEditor = false;
     std::string fSmpPath[4];
     int fRoot[4] = {60, 60, 60, 60};
