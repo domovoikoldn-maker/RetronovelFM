@@ -3,6 +3,7 @@
 #include "RetroData.hpp"
 #include "RetroCharacters.hpp"
 #include "pixelart/PixelArt.hpp"
+#include "RetroVocal.hpp"
 #include <vector>
 #include <chrono>
 #include <cmath>
@@ -32,9 +33,10 @@ struct Box {
 };
 
 enum CtlType { ctSelect, ctKnob, ctToggle, ctAction, ctEraTab, ctLoad, ctClearSmp, ctRootDn, ctRootUp,
-               ctEditOpen, ctEditClose, ctEditUser, ctEditLen, ctEditClear, ctEditCopy, ctCell };
+               ctEditOpen, ctEditClose, ctEditUser, ctEditLen, ctEditClear, ctEditCopy, ctCell,
+               ctIdol, ctLyricPreset, ctLyricEdit, ctLyricRewind };
 // control groups: 0 = always, 1..3 = only on that era tab (FM / XP / user), 10 = drum editor overlay
-enum CtlGroup { gAlways = 0, gFM = 1, gXP = 2, gUser = 3, gEditor = 10 };
+enum CtlGroup { gAlways = 0, gFM = 1, gXP = 2, gUser = 3, gEditor = 10, gVocal = 11, gInst = 12 };
 enum ActionId { aPrev, aNext, aRandom };
 
 struct Control {
@@ -57,9 +59,13 @@ public:
 
         static const int seed[4] = { 0, 5, 7, 11 };
         for (int u = 0; u < 4; ++u) { copyPreset(u, seed[u]); fRoot[u] = 60; }
+        fLyrics = kLyricPresets[0][1]; parseLyrics(fLyrics.c_str(), fSyl);
         buildLayout();
        #ifdef RETRO_SCREENSHOT
         if (std::getenv("RETRO_EDITOR")) { fEditor = true; fEditUser = 0; }
+        if (const char* e = std::getenv("RETRO_VOCAL")) { fParams[pVocalMode] = 1; fParams[pIdol] = (float)std::atoi(e); fForceVocal = true;
+            fLyrics = kLyricPresets[2][1]; parseLyrics(fLyrics.c_str(), fSyl); fParams[pOutSyll] = 3; fParams[pOutMouth] = 0.9f; fParams[pOutVowel] = 0; }
+        if (std::getenv("RETRO_TYPING")) { fEditing = true; fEditBuf = "мы по-ём вме-сте до-ро-га"; }
         if (const char* e = std::getenv("RETRO_EXPORT")) { fExport = true; fExportGirl = std::strcmp(e, "girl") == 0; }
         if (const char* e = std::getenv("RETRO_FRAME")) { const int f = std::atoi(e); fForceBlink = f == 1 ? 1 : 0; fForceMouth = f == 2 ? 1 : 0; }
         if (const char* e = std::getenv("RETRO_BG")) fExportWhite = std::atoi(e) == 1;
@@ -77,6 +83,7 @@ protected:
     {
         if (index >= (uint32_t)kParamCount) return;
        #ifdef RETRO_SCREENSHOT
+        if (fForceVocal && (index == pVocalMode || index == pIdol || index == pOutSyll || index == pOutMouth || index == pOutVowel)) return;
         if (index == pOutActivity && std::getenv("RETRO_ACT")) return;
         if ((index == pDrumMode || index == pDrumPattern || index == pOutDrumStep) && std::getenv("RETRO_DRUMS")) return;
        #endif
@@ -96,6 +103,7 @@ protected:
     // DSP state -> UI (user samples, roots, user drum patterns)
     void stateChanged(const char* key, const char* value) override
     {
+        if (key && value && !std::strcmp(key, "lyrics")) { fLyrics = value; parseLyrics(value, fSyl); repaint(); return; }
         if (!key || !value || std::strlen(key) < 4) return;
         const int k = key[std::strlen(key) - 1] - '1';
         if (k < 0 || k > 3) return;
@@ -147,6 +155,13 @@ protected:
         }
         const float sw = std::fmin(1.f, (fT - fSwitchT) / 0.45f);
 
+        if (fParams[pVocalMode] > 0.5f)
+        {
+            drawVocalScreen(inst);
+            restore();
+            return;
+        }
+        fHeroU = 92.f; fHeroY = 214.f; fDrawingIdol = false;
         // PC-98 era = pixel art, Windows XP era = detailed 2000s style
         const bool pixel = eraOf(inst) == eraPC98;
         fPixelUI = pixel;
@@ -187,13 +202,31 @@ protected:
             if (fDrag >= 0) { editParameter(fCtl[fDrag].param, false); fDrag = -1; return true; }
             return false;
         }
+        bool hitEdit = false;
+        for (int i = 0; i < fCtlCount; ++i) if (fCtl[i].type == ctLyricEdit && visible(fCtl[i]) && fCtl[i].b.hit(px, py)) hitEdit = true;
+        if (fEditing && !hitEdit) commitLyrics();
         for (int i = 0; i < fCtlCount; ++i)
         {
             Control& c = fCtl[i];
             if (!visible(c) || !c.b.hit(px, py)) continue;
             const int cur = clampi((int)std::lround(fParams[pInstrument]), 0, kNumInstruments - 1);
+            if (c.type == ctAction && fParams[pVocalMode] > 0.5f)
+            {
+                const int ci = clampi((int)std::lround(fParams[pIdol]), 0, kNumIdols - 1);
+                int n = c.value == aPrev ? (ci + kNumIdols - 1) % kNumIdols : (c.value == aNext ? (ci + 1) % kNumIdols : (int)(hash01((int)(fT * 1000)) * kNumIdols) % kNumIdols);
+                selectIdol(n);
+                repaint();
+                return true;
+            }
             switch (c.type)
             {
+            case ctIdol: selectIdol((int)c.value); break;
+            case ctLyricPreset: fLyrics = kLyricPresets[(int)c.value][1]; setState("lyrics", fLyrics.c_str()); parseLyrics(fLyrics.c_str(), fSyl); fEditing = false; break;
+            case ctLyricEdit:
+                if (!fEditing) { fEditing = true; fEditBuf = fLyrics; getWindow().focus(); }
+                else if (c.param == 0) commitLyrics();
+                break;
+            case ctLyricRewind: setState("lyrics", fLyrics.c_str()); break;
             case ctSelect:
                 if (c.param == pDrumPattern && c.value < kNumPresetPatterns) fLastPreset = (int)c.value;
                 setParam(c.param, c.value);
@@ -286,6 +319,24 @@ protected:
         return false;
     }
 
+    bool onKeyboard(const KeyboardEvent& ev) override
+    {
+        if (!fEditing || !ev.press) return false;
+        if (ev.key == kKeyBackspace) { while (!fEditBuf.empty() && (fEditBuf.back() & 0xC0) == 0x80) fEditBuf.pop_back(); if (!fEditBuf.empty()) fEditBuf.pop_back(); }
+        else if (ev.key == kKeyEnter) commitLyrics();
+        else if (ev.key == kKeyEscape) fEditing = false;
+        else return true;   // printable keys arrive through onCharacterInput
+        repaint();
+        return true;
+    }
+    bool onCharacterInput(const CharacterInputEvent& ev) override
+    {
+        if (!fEditing) return false;
+        if (ev.character >= 32 && ev.character != 127 && fEditBuf.size() < 900) fEditBuf += ev.string;
+        repaint();
+        return true;
+    }
+
     bool onScroll(const ScrollEvent& ev) override
     {
         const float sc = getHeight() / kH;
@@ -328,10 +379,29 @@ private:
     {
         if (fEditor) return c.group == gEditor;
         if (c.group == gEditor) return false;
-        if (c.group == gFM) return fEraTab == eraPC98;
-        if (c.group == gXP) return fEraTab == eraXP;
-        if (c.group == gUser) return fEraTab == eraUser;
+        const bool vocal = fParams[pVocalMode] > 0.5f;
+        if (c.group == gVocal) return vocal;
+        if (c.group == gInst) return !vocal;
+        if (c.group == gFM) return !vocal && fEraTab == eraPC98;
+        if (c.group == gXP) return !vocal && fEraTab == eraXP;
+        if (c.group == gUser) return !vocal && fEraTab == eraUser;
         return true;
+    }
+
+    void selectIdol(int n)
+    {
+        const IdolVoice& V = kIdolVoices[n];
+        setParam(pIdol, (float)n);
+        setParam(pVGender, V.gender); setParam(pVFormant, V.formant); setParam(pVBreath, V.breath);
+        setParam(pVVib, V.vib); setParam(pVVibRate, V.vibRate); setParam(pVBright, V.bright); setParam(pVGlide, V.glide);
+        fTypeT = fT;
+    }
+    void commitLyrics()
+    {
+        fEditing = false;
+        fLyrics = fEditBuf;
+        parseLyrics(fLyrics.c_str(), fSyl);
+        setState("lyrics", fLyrics.c_str());
     }
 
     // ---- user drum patterns (same text format as the DSP: 9 lanes joined by '|', then ';len')
@@ -386,7 +456,7 @@ private:
         // era tabs
         static const char* const tabs[3] = { "PC-98 \xE2\x80\xA2 90s", "WIN XP \xE2\x80\xA2 00s", "MY SAMPLES" };
         static const float tx[3] = { 24.f, 104.f, 186.f }, tw[3] = { 78.f, 80.f, 68.f };
-        for (int i = 0; i < 3; ++i) addCtl(ctEraTab, pInstrument, (float)i, tx[i], 82.f, tw[i], 22.f, tabs[i]);
+        for (int i = 0; i < 3; ++i) addCtl(ctEraTab, pInstrument, (float)i, tx[i], 82.f, tw[i], 22.f, tabs[i], gInst);
         // PC-98 FM list
         for (int i = 0; i < kNumFM; ++i)
             addCtl(ctSelect, pInstrument, (float)i, 26.f + (i % 2) * 117.f, 110.f + (i / 2) * 27.f, 112.f, 23.f, kInstrumentNames[i], gFM);
@@ -407,7 +477,21 @@ private:
         static const int knobs[8] = { pVolume, pBrightness, pRelease, pVibDepth, pLofi, pChorus, pReverb, pVelSens };
         static const char* const klab[8] = { "VOLUME", "BRIGHT", "RELEASE", "VIBRATO", "LO-FI", "CHORUS", "REVERB", "VELOCITY" };
         for (int i = 0; i < 8; ++i)
-            addCtl(ctKnob, knobs[i], 0, 716.f + (i % 2) * 114.f, 84.f + (i / 2) * 88.f, 104.f, 84.f, klab[i]);
+            addCtl(ctKnob, knobs[i], 0, 716.f + (i % 2) * 114.f, 84.f + (i / 2) * 88.f, 104.f, 84.f, klab[i], gInst);
+        // vocal mode: voice knobs, idol cards, lyrics controls
+        static const int vknobs[8] = { pVGender, pVFormant, pVBreath, pVVib, pVVibRate, pVBright, pVGlide, pVolume };
+        static const char* const vlab[8] = { "GENDER", "VOICE SIZE", "BREATH", "VIBRATO", "VIB SPEED", "BRIGHT", "GLIDE", "VOLUME" };
+        for (int i = 0; i < 8; ++i)
+            addCtl(ctKnob, vknobs[i], 0, 716.f + (i % 2) * 114.f, 84.f + (i / 2) * 88.f, 104.f, 84.f, vlab[i], gVocal);
+        for (int i = 0; i < kNumIdols; ++i)
+            addCtl(ctIdol, pIdol, (float)i, 26.f, 84.f + i * 58.f, 224.f, 54.f, kIdolVoices[i].name, gVocal);
+        for (int i = 0; i < 6; ++i)
+            addCtl(ctLyricPreset, 0, (float)i, 30.f + i * 92.f, 506.f, 88.f, 20.f, kLyricPresets[i][0], gVocal);
+        addCtl(ctLyricEdit,   0, 0, 586.f, 506.f, 92.f, 20.f, "EDIT \xE2\x9C\x8E", gVocal);
+        addCtl(ctLyricRewind, 0, 0, 682.f, 506.f, 80.f, 20.f, "\xE2\x9F\xB2 START", gVocal);
+        addCtl(ctLyricEdit,   1, 0, 30.f, 474.f, 900.f, 28.f, nullptr, gVocal);   // click on the lyric line = edit
+        // top bar: vocal mode switch
+        addCtl(ctToggle, pVocalMode, 0, 470.f, 10.f, 140.f, 26.f, "VOCAL", gAlways);
         // top bar actions
         addCtl(ctAction, pInstrument, aPrev,   640.f, 10.f, 40.f, 26.f, "\xE2\x97\x80");
         addCtl(ctAction, pInstrument, aNext,   684.f, 10.f, 40.f, 26.f, "\xE2\x96\xB6");
@@ -473,6 +557,195 @@ private:
     }
 
     // ================================================================== scene
+    // ================================================================== vocal stage
+    void drawStage(const CharacterDef& I)
+    {
+        const float beat = fParams[pOutBeat], sing = fParams[pOutMouth];
+        beginPath(); rect(-40, -40, kW + 80, kH + 80);
+        fillPaint(linearGradient(0, 0, 0, 500, hexc(0x07061a), hexc(0x2a1048))); fill();
+        // LED wall (dot matrix) reacting to the beat and the voice
+        save(); layer(6.f);
+        beginPath(); rect(150, 52, 660, 262); fillColor(Color(8, 6, 20)); fill();
+        for (int lvl = 0; lvl < 4; ++lvl)
+        {
+            beginPath();
+            for (int gy = 0; gy < 26; ++gy)
+                for (int gx = 0; gx < 66; ++gx)
+                {
+                    const float u = gx / 66.f, v = gy / 26.f;
+                    float w = 0.3f + 0.3f * std::sin(u * 9.f + fT * 1.7f) * std::cos(v * 6.f - fT * 1.1f);
+                    const float bar = std::fabs(std::sin(gx * 0.37f + fT * 2.f)) * (0.25f + 0.55f * sing) + beat * 0.25f;
+                    if (1.f - v < bar) w = std::fmax(w, 1.f - v > bar - 0.05f ? 0.95f : 0.7f);
+                    const int L = (int)(w * 4.f);
+                    if (std::min(3, L) == lvl) rect(152 + gx * 10.f, 54 + gy * 10.f, 7, 7);
+                }
+            static const float al[4] = { 0.06f, 0.2f, 0.55f, 0.95f };
+            fillColor(lvl == 3 ? mixc(I.accent, 0xffffff, 0.6f) : hexc(I.accent, al[lvl])); fill();
+        }
+        // stage name on the wall
+        outlinedLabel(480, 76, "LIVE  \xE2\x98\x85  RETRO NOVEL", 16.f, Color(255, 255, 255, 0.9f), hexc(I.accent, 0.6f), ALIGN_CENTER | ALIGN_BASELINE);
+        restore();
+        // truss with lamps
+        save(); layer(10.f);
+        beginPath(); rect(-40, 30, kW + 80, 14); fillColor(Color(40, 40, 56)); fill();
+        for (int k = 0; k < 12; ++k)
+        {
+            const float x = 40 + k * 80.f;
+            beginPath(); circle(x, 46, 9); fillColor(Color(70, 70, 90)); fill();
+            beginPath(); circle(x, 48, 5); fillColor(k % 2 ? hexc(I.accent) : Color(255, 240, 200)); fill();
+        }
+        restore();
+        // moving spotlights
+        for (int k = 0; k < 5; ++k)
+        {
+            const float ox = 120 + k * 180.f, a = std::sin(fT * (0.5f + k * 0.13f) + k) * 0.45f;
+            const float ex = ox + std::sin(a) * 520, ey = 46 + std::cos(a) * 520;
+            beginPath(); moveTo(ox - 8, 46); lineTo(ox + 8, 46); lineTo(ex + 110, ey); lineTo(ex - 110, ey); closePath();
+            fillPaint(linearGradient(ox, 46, ex, ey, k % 2 ? hexc(I.accent, 0.2f + beat * 0.15f) : Color(255, 245, 220, 0.12f + beat * 0.1f), Color(255, 255, 255, 0.f)));
+            fill();
+        }
+        // glossy stage floor with reflection
+        save(); layer(16.f);
+        beginPath(); rect(-60, 330, kW + 120, 140);
+        fillPaint(linearGradient(0, 330, 0, 470, Color(40, 30, 70), Color(10, 8, 24))); fill();
+        beginPath(); rect(150, 334, 660, 60); fillPaint(linearGradient(0, 334, 0, 394, hexc(I.accent, 0.25f), hexc(I.accent, 0.f))); fill();
+        for (int k = 0; k < 16; ++k) { beginPath(); circle(30 + k * 60.f, 332, 3); fillColor(hexc(k % 2 ? I.accent : 0xffffff, 0.8f)); fill(); }
+        restore();
+        // crowd with glow sticks
+        save(); layer(30.f);
+        for (int row = 0; row < 3; ++row)
+            for (int k = 0; k < 18; ++k)
+            {
+                const float x = -20 + k * 58.f + (row % 2) * 29.f + hash01(k + row * 50) * 10;
+                const float y = 470 + row * 55.f;
+                const float sway = std::sin(fT * 2.2f + k * 0.7f + row) * 0.35f + beat * 0.25f * ((k % 2) ? 1 : -1);
+                // glow stick
+                save(); translate(x + 14, y - 8); rotate(sway);
+                beginPath(); roundedRect(-3, -46, 6, 40, 3);
+                fillColor(hexc((k + row) % 3 == 0 ? 0xffffff : I.accent, 0.95f)); fill();
+                beginPath(); roundedRect(-8, -52, 16, 52, 8); fillColor(hexc(I.accent, 0.18f)); fill();
+                restore();
+                beginPath(); ellipse(x, y, 22, 26); fillColor(Color(16, 12, 30)); fill();
+                beginPath(); ellipse(x, y + 40, 34, 26); fill();
+            }
+        restore();
+        // floating sparkles
+        for (int i = 0; i < 30; ++i)
+        {
+            const float x = std::fmod(hash01(i + 700) * kW + fT * 10.f, kW), y = std::fmod(hash01(i + 800) * 420 + fT * (8 + i % 5), 420.f);
+            const float sz = 1.5f + hash01(i) * 2.5f, tw = 0.5f + 0.5f * std::sin(fT * 4 + i);
+            beginPath(); circle(x, y, sz); fillColor(Color(255, 255, 255, 0.6f * tw)); fill();
+        }
+    }
+
+    void drawVocalScreen(int inst)
+    {
+        const int idol = clampi((int)std::lround(fParams[pIdol]), 0, kNumIdols - 1);
+        if (idol != fIdolShown) { fPrevIdol = fIdolShown < 0 ? idol : fIdolShown; fIdolShown = idol; fIdolSwitchT = fT; }
+        const CharacterDef& I = kIdols[idol];
+        fPixelUI = false;
+        drawStage(I);
+        fHeroU = 100.f; fHeroY = 206.f; fDrawingIdol = true;
+        const float sw = std::fmin(1.f, (fT - fIdolSwitchT) / 0.45f), ease = 1.f - (1.f - sw) * (1.f - sw);
+        if (sw < 1.f && fPrevIdol != idol) { globalAlpha(1.f - ease); drawHeroine(kIdols[fPrevIdol], 480.f - 60.f * ease, 1.f); }
+        globalAlpha(ease); drawHeroine(I, 480.f + 60.f * (1.f - ease), 1.f); globalAlpha(1.f);
+        fDrawingIdol = false;
+        drawNotes(I);
+        drawTopBar(I);
+        drawIdolPanel(I);
+        drawSoundPanel(I);
+        drawLyricsBox(I);
+        drawDrumPanel(I);
+        if (fEditor) drawEditor(I);
+        (void)inst;
+    }
+
+    void drawIdolPanel(const CharacterDef& I)
+    {
+        glassPanel(16, 56, 244, 390, I.accent);
+        panelTitle(28, 72, "IDOLS", I.accent);
+        const int cur = clampi((int)std::lround(fParams[pIdol]), 0, kNumIdols - 1);
+        for (int i = 0; i < fCtlCount; ++i)
+        {
+            const Control& c = fCtl[i];
+            if (c.type != ctIdol) continue;
+            const int k = (int)c.value;
+            const CharacterDef& D = kIdols[k];
+            const bool sel = k == cur;
+            pill(c.b, sel, hover(c.b), D.accent, 14.f);
+            // tiny portrait: hair colour circle with eyes
+            beginPath(); circle(c.b.x + 27, c.b.y + 27, 20); fillColor(hexc(D.hair)); fill(); strokeWidth(1.5f); strokeColor(hexc(D.hairDark)); stroke();
+            beginPath(); ellipse(c.b.x + 27, c.b.y + 32, 13, 12); fillColor(Color(255, 236, 224)); fill();
+            beginPath(); ellipse(c.b.x + 22, c.b.y + 32, 2.5f, 3.5f); ellipse(c.b.x + 32, c.b.y + 32, 2.5f, 3.5f); fillColor(hexc(D.eye)); fill();
+            char nm[64]; std::snprintf(nm, sizeof(nm), "%s %s", D.name, D.male ? "\xE2\x99\x82" : "\xE2\x99\x80");
+            label(c.b.x + 56, c.b.y + 24, nm, 15.f, sel ? Color(255, 255, 255) : Color(60, 40, 80), ALIGN_LEFT | ALIGN_BASELINE);
+            label(c.b.x + 56, c.b.y + 42, D.role, 10.5f, sel ? Color(255, 255, 255, 0.9f) : Color(120, 90, 140), ALIGN_LEFT | ALIGN_BASELINE);
+        }
+    }
+
+    void drawLyricsBox(const CharacterDef& I)
+    {
+        const float x = 16, y = 456, w = 928, h = 76;
+        beginPath(); roundedRect(x, y, w, h, 12);
+        fillPaint(linearGradient(0, y, 0, y + h, Color(20, 14, 46, 0.92f), Color(44, 20, 70, 0.92f))); fill();
+        strokeWidth(2.f); strokeColor(hexc(I.accent, 0.9f)); stroke();
+        // name plate
+        beginPath(); roundedRect(x + 18, y - 18, 240, 30, 10);
+        fillPaint(linearGradient(x + 18, 0, x + 258, 0, hexc(I.accent), mixc(I.accent, 0xff5fa8, 0.5f))); fill();
+        strokeWidth(2.f); strokeColor(Color(255, 255, 255)); stroke();
+        char nm[96]; std::snprintf(nm, sizeof(nm), "%s \xE2\x99\xAA %s", I.name, I.role);
+        outlinedLabel(x + 32, y + 3, nm, 15.f, Color(255, 255, 255), hexc(I.accent, 0.6f), ALIGN_LEFT | ALIGN_BASELINE, 1.2f);
+        label(x + w - 22, y + 14, "1 note = 1 syllable  \xE2\x80\xA2  \"-\" = hold", 10.f, Color(255, 255, 255, 0.6f), ALIGN_RIGHT | ALIGN_BASELINE);
+
+        fontFace(NANOVG_DEJAVU_SANS_TTF); fontSize(19.f); textAlign(ALIGN_LEFT | ALIGN_BASELINE);
+        if (fEditing)
+        {
+            beginPath(); roundedRect(x + 12, y + 16, w - 24, 30, 6); fillColor(Color(255, 255, 255, 0.12f)); fill();
+            strokeWidth(1.5f); strokeColor(hexc(I.accent)); stroke();
+            // show the tail of the text so the caret stays visible
+            const char* tx = fEditBuf.c_str();
+            Rectangle<float> bnd;
+            while (*tx && textBounds(0, 0, tx, nullptr, bnd) > w - 70) { ++tx; while ((*tx & 0xC0) == 0x80) ++tx; }
+            fillColor(Color(255, 255, 255));
+            const float ex = text(x + 22, y + 38, tx, nullptr);
+            if (std::fmod(fT, 1.f) < 0.55f) { beginPath(); rect(ex + 2, y + 21, 2, 21); fillColor(hexc(I.accent)); fill(); }
+        }
+        else
+        {
+            // karaoke line: syllables around the current one
+            const int cur = (int)std::lround(fParams[pOutSyll]);
+            const int n = (int)fSyl.size();
+            int start = 0;
+            if (cur > 4) start = cur - 4;
+            float px = x + 24;
+            for (int k = start; k < n && px < x + w - 40; ++k)
+            {
+                const bool now = k == cur, past = cur >= 0 && k < cur;
+                const char* t = fSyl[k].text;
+                Rectangle<float> bnd; const float adv = textBounds(0, 0, t, nullptr, bnd);
+                if (now)
+                {
+                    beginPath(); roundedRect(px - 5, y + 18, adv + 10, 28, 8); fillColor(hexc(I.accent, 0.85f)); fill();
+                }
+                fillColor(now ? Color(255, 255, 255) : (past ? Color(255, 255, 255, 0.4f) : Color(255, 255, 255, 0.9f)));
+                text(px, y + 39, t, nullptr);
+                px += adv + 14;
+            }
+            if (n == 0) { fillColor(Color(255, 255, 255, 0.6f)); text(x + 24, y + 39, "(click here and type lyrics)", nullptr); }
+        }
+        // preset chips + edit + restart
+        for (int i = 0; i < fCtlCount; ++i)
+        {
+            const Control& c = fCtl[i];
+            if (c.group != gVocal || c.b.h > 24.f || (c.type != ctLyricPreset && c.type != ctLyricEdit && c.type != ctLyricRewind)) continue;
+            const bool sel = c.type == ctLyricEdit && fEditing;
+            beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 10);
+            fillColor(sel ? hexc(I.accent) : (hover(c.b) ? Color(255, 255, 255, 0.3f) : Color(255, 255, 255, 0.14f))); fill();
+            strokeWidth(1.f); strokeColor(hexc(I.accent, 0.8f)); stroke();
+            label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, sel ? "OK \xE2\x86\xB5" : c.label, 10.5f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
+        }
+    }
+
     // ================================================================== PC-98 pixel art
     NanoImage& pxImage(int c, int frame)   // frame -1 = background
     {
@@ -861,8 +1134,8 @@ private:
         const float beat = fParams[pOutBeat];
         const float breathe = fExport ? 0.f : std::sin(fT * 2.1f) * 2.2f;
         const float bob = fExport ? 0.f : beat * beat * 5.f;
-        const float u = 92.f;               // pixels per head-radius
-        const float cy = 214.f + breathe * 0.4f + bob;
+        const float u = fHeroU;             // pixels per head-radius
+        const float cy = fHeroY + breathe * 0.4f + bob;
         const float lx = fLX, ly = fLY;    // where she looks (-1..1), drives the "Live2D" turn
 
         save();
@@ -959,6 +1232,30 @@ private:
             fillPaint(hairPaint(C, -0.3f, 0.95f)); fill(); hairStroke(C);
             break;
         }
+        case hsSideTail:
+        {
+            const float sw = std::sin(fT * 1.5f) * 0.06f;
+            beginPath();
+            moveTo(0.62f, -0.7f);
+            bezierTo(1.45f, -0.75f, 1.55f + sw, 0.5f, 1.4f + sw, 1.6f);
+            bezierTo(1.35f + sw, 2.2f, 1.1f + sw, 2.5f, 1.25f + sw, 2.9f);
+            bezierTo(0.95f + sw, 2.3f, 0.95f, 1.2f, 0.92f, 0.2f);
+            closePath();
+            fillPaint(hairPaint(C, -0.7f, 2.9f)); fill(); hairStroke(C);
+            beginPath(); moveTo(-0.55f, -0.78f); bezierTo(-1.2f, -0.7f, -1.12f, 0.75f, -0.82f, 1.1f); lineTo(0.82f, 1.1f);
+            bezierTo(1.12f, 0.75f, 1.2f, -0.7f, 0.55f, -0.78f); closePath();
+            fillPaint(hairPaint(C, -0.4f, 1.1f)); fill(); hairStroke(C);
+            break;
+        }
+        case hsBoyShort:
+        case hsBoySpiky:
+        {
+            beginPath(); moveTo(-0.55f, -0.78f); bezierTo(-1.12f, -0.7f, -1.08f, 0.3f, -0.92f, 0.55f);
+            lineTo(-0.8f, 0.45f); lineTo(-0.7f, 0.62f); lineTo(0.7f, 0.62f); lineTo(0.8f, 0.45f); lineTo(0.92f, 0.55f);
+            bezierTo(1.08f, 0.3f, 1.12f, -0.7f, 0.55f, -0.78f); closePath();
+            fillPaint(hairPaint(C, -0.6f, 0.6f)); fill(); hairStroke(C);
+            break;
+        }
         case hsBob:
         case hsBraids:
         case hsBun:
@@ -970,6 +1267,14 @@ private:
     }
 
     void drawBody(const CharacterDef& C)
+    {
+        save();
+        if (C.male) scale(1.1f, 1.f);
+        drawBodyInner(C);
+        restore();
+    }
+
+    void drawBodyInner(const CharacterDef& C)
     {
         const Color skin(255, 233, 220), skinSh(240, 196, 182);
         lineJoin(ROUND);
@@ -1083,6 +1388,47 @@ private:
             beginPath(); rect(-1.6f, 2.62f, 3.2f, 0.05f); fillColor(hexc(C.collar)); fill();
             break;
         }
+        case ofIdolDress:
+        {
+            // stage dress: frilled neckline, big bow, sparkles, puff sleeves
+            for (int sd = -1; sd <= 1; sd += 2)
+            {
+                beginPath(); ellipse(sd * 1.2f, 1.62f, 0.3f, 0.28f); fillColor(hexc(C.collar)); fill();
+                strokeWidth(0.015f); strokeColor(mixc(C.collar, 0x000000, 0.3f)); stroke();
+                for (int k = 0; k < 4; ++k) { beginPath(); circle(sd * (1.02f + k * 0.11f), 1.88f + (k % 2) * 0.02f, 0.05f); fillColor(Color(255, 255, 255)); fill(); }
+            }
+            beginPath(); moveTo(-0.45f, 1.18f); quadTo(0, 1.55f, 0.45f, 1.18f); lineTo(0.5f, 1.32f); quadTo(0, 1.7f, -0.5f, 1.32f); closePath();
+            fillColor(Color(255, 255, 255)); fill(); strokeWidth(0.012f); strokeColor(Color(200, 200, 220)); stroke();
+            beginPath(); rect(-0.22f, 1.02f, 0.44f, 0.07f); fillColor(hexc(C.ribbon)); fill();   // choker
+            drawBow(C.ribbon, 0, 1.72f, 0.42f);
+            for (int k = 0; k < 18; ++k)
+            {
+                const float x = -1.3f + hash01(k + 3000) * 2.6f, y = 2.0f + hash01(k + 3100) * 0.9f;
+                const float tw = 0.5f + 0.5f * std::sin(fT * 3.f + k);
+                beginPath(); circle(x, y, 0.022f); fillColor(Color(255, 255, 255, 0.4f + 0.6f * tw)); fill();
+            }
+            beginPath(); rect(-1.6f, 2.45f, 3.2f, 0.06f); fillColor(hexc(C.ribbon, 0.9f)); fill();
+            break;
+        }
+        case ofIdolJacket:
+        {
+            // open stage jacket over a shirt, tie, star badge
+            beginPath(); moveTo(-0.3f, 1.12f); lineTo(0, 1.95f); lineTo(0.3f, 1.12f); closePath(); fillColor(Color(245, 245, 250)); fill();
+            beginPath(); moveTo(-0.06f, 1.2f); lineTo(0.06f, 1.2f); lineTo(0.09f, 1.85f); lineTo(0, 1.97f); lineTo(-0.09f, 1.85f); closePath(); fillColor(hexc(C.ribbon)); fill();
+            for (int sd = -1; sd <= 1; sd += 2)
+            {
+                beginPath(); moveTo(sd * 0.3f, 1.1f); lineTo(sd * 0.7f, 1.3f); lineTo(sd * 0.42f, 1.62f); lineTo(sd * 0.05f, 2.4f); lineTo(sd * 0.05f, 3.0f); lineTo(sd * 1.6f, 3.0f); lineTo(sd * 1.5f, 1.6f); closePath();
+                fillColor(mixc(C.outfit, 0xffffff, 0.06f)); fill();
+                beginPath(); moveTo(sd * 0.3f, 1.1f); lineTo(sd * 0.7f, 1.3f); lineTo(sd * 0.42f, 1.62f); lineTo(sd * 0.05f, 2.4f);
+                strokeWidth(0.04f); strokeColor(hexc(C.collar)); stroke();
+            }
+            save(); translate(0.75f, 1.85f); rotate(0.2f);
+            beginPath();
+            for (int k = 0; k < 10; ++k) { const float r = (k & 1) ? 0.05f : 0.12f, a = -kPi / 2 + k * kPi / 5; if (k == 0) moveTo(std::cos(a) * r, std::sin(a) * r); else lineTo(std::cos(a) * r, std::sin(a) * r); }
+            closePath(); fillColor(Color(255, 220, 90)); fill();
+            restore();
+            break;
+        }
         case ofGothic:
         {
             // lace collar: two rows of white scallops along the neckline
@@ -1132,6 +1478,18 @@ private:
 
     void drawHairBehindHead(const CharacterDef& C)
     {
+        if (C.hs == hsBoySpiky)
+        {
+            // spikes sticking out of the crown
+            static const float sp[7][3] = { {-0.95f, -0.35f, -1.25f}, {-0.75f, -0.75f, -1.05f}, {-0.35f, -1.0f, -1.3f}, {0.05f, -1.05f, -1.42f},
+                                            {0.45f, -0.98f, -1.28f}, {0.8f, -0.7f, -0.98f}, {0.98f, -0.3f, -1.2f} };
+            for (const auto& q : sp)
+            {
+                const float a = q[0], b = q[1];
+                beginPath(); moveTo(a * 0.75f, b * 0.8f + 0.05f); lineTo(a * 1.22f, b * 0.95f + (q[2] - b) * 0.55f); lineTo(a * 0.95f + 0.12f, b * 0.8f + 0.1f); closePath();
+                fillPaint(hairPaint(C, -1.4f, -0.3f)); fill(); hairStroke(C);
+            }
+        }
         if (C.hs == hsBun)
         {
             beginPath(); circle(0.0f, -1.08f, 0.42f); fillPaint(hairPaint(C, -1.5f, -0.7f)); fill(); hairStroke(C);
@@ -1166,14 +1524,23 @@ private:
         fillPaint(radialGradient(0.72f + fx, 0.35f, 0.05f, 0.4f, Color(240, 190, 180, 0.35f), Color(240, 190, 180, 0.f))); fill();
 
         save(); translate(fx, fy);
+        // male idols: visible brows, softer blush
+        if (C.male)
+        {
+            lineCap(ROUND); strokeWidth(0.04f); strokeColor(mixc(C.hairDark, 0x000000, 0.2f));
+            for (int s2 = -1; s2 <= 1; s2 += 2) { beginPath(); moveTo(s2 * 0.2f, -0.12f); quadTo(s2 * 0.38f, -0.19f, s2 * 0.56f, -0.14f); stroke(); }
+        }
         // airbrushed blush + 2000s hatch lines
         for (int s2 = -1; s2 <= 1; s2 += 2)
         {
-            const float bx = s2 * 0.5f, by = 0.47f, ba = 0.38f + 0.2f * std::fmin(1.f, act * 2);
+            const float bx = s2 * 0.5f, by = 0.47f, ba = (C.male ? 0.12f : 0.38f) + 0.2f * std::fmin(1.f, act * 2);
             beginPath(); ellipse(bx, by, 0.24f, 0.13f);
             fillPaint(radialGradient(bx, by, 0.02f, 0.22f, Color(255, 120, 140, ba), Color(255, 120, 140, 0.f))); fill();
-            strokeWidth(0.011f); strokeColor(Color(235, 100, 120, 0.55f));
-            for (int k = 0; k < 3; ++k) { beginPath(); moveTo(bx - 0.06f + k * 0.055f, by - 0.035f); lineTo(bx - 0.08f + k * 0.055f, by + 0.03f); stroke(); }
+            if (!C.male)
+            {
+                strokeWidth(0.011f); strokeColor(Color(235, 100, 120, 0.55f));
+                for (int k = 0; k < 3; ++k) { beginPath(); moveTo(bx - 0.06f + k * 0.055f, by - 0.035f); lineTo(bx - 0.08f + k * 0.055f, by + 0.03f); stroke(); }
+            }
         }
 
         // eyes
@@ -1193,7 +1560,24 @@ private:
         beginPath(); circle(-0.025f, 0.41f, 0.012f); fillColor(Color(255, 255, 255, 0.7f)); fill();
 
         // mouth
-        const float open = fForceMouth >= 0 ? (float)fForceMouth : (act > 0.03f ? (0.5f + 0.5f * std::sin(fT * 13.f)) * std::fmin(1.f, act * 2.5f) : 0.f);
+        float open = fForceMouth >= 0 ? (float)fForceMouth : (act > 0.03f ? (0.5f + 0.5f * std::sin(fT * 13.f)) * std::fmin(1.f, act * 2.5f) : 0.f);
+        if (fDrawingIdol)
+        {
+            // lip sync with the sung vowel
+            open = fParams[pOutMouth];
+            const int vw = (int)std::lround(fParams[pOutVowel]);
+            static const float mw[6] = { 0.085f, 0.1f, 0.045f, 0.09f, 0.06f, 0.07f }, mh[6] = { 0.13f, 0.045f, 0.06f, 0.075f, 0.1f, 0.0f };
+            if (open > 0.06f && vw < 5)
+            {
+                const float w = mw[vw], h = 0.012f + mh[vw] * open;
+                beginPath(); ellipse(0, 0.63f, w, h); fillColor(Color(150, 44, 66)); fill();
+                beginPath(); ellipse(0, 0.63f + h * 0.55f, w * 0.6f, h * 0.35f); fillColor(Color(255, 140, 160)); fill();
+                if (h > 0.03f) { beginPath(); rect(-w * 0.6f, 0.63f - h + 0.004f, w * 1.2f, 0.016f); fillColor(Color(255, 255, 255, 0.9f)); fill(); }
+                restore();
+                return;
+            }
+            open = 0;
+        }
         if (open > 0.08f)
         {
             beginPath(); moveTo(-0.085f, 0.6f); quadTo(0, 0.615f, 0.085f, 0.6f); quadTo(0.065f, 0.67f + open * 0.1f, 0, 0.68f + open * 0.1f);
@@ -1214,7 +1598,7 @@ private:
     void drawEye(const CharacterDef& C, float x, float y, float dir, bool blink, bool happy)
     {
         save();
-        translate(x, y); scale(dir, 1.f);
+        translate(x, y); scale(dir, C.male ? 0.8f : 1.f);
         lineCap(ROUND); lineJoin(ROUND);
         const Color lash = mixc(C.hairDark, 0x1a0c14, 0.6f);
         if (blink || happy)
@@ -1264,7 +1648,8 @@ private:
         beginPath();
         moveTo(-0.23f, 0.02f);
         bezierTo(-0.14f, -0.22f, 0.13f, -0.25f, 0.26f, -0.07f);
-        lineTo(0.33f, -0.12f); lineTo(0.28f, -0.03f); lineTo(0.33f, -0.02f); lineTo(0.25f, 0.0f);
+        if (C.male) lineTo(0.27f, -0.02f);
+        else { lineTo(0.33f, -0.12f); lineTo(0.28f, -0.03f); lineTo(0.33f, -0.02f); lineTo(0.25f, 0.0f); }
         bezierTo(0.12f, -0.16f, -0.12f, -0.16f, -0.2f, 0.04f);
         closePath();
         fillColor(lash); fill();
@@ -1283,7 +1668,16 @@ private:
         beginPath();
         moveTo(-0.92f, 0.05f + dy);
         bezierTo(-1.08f, -1.25f + dy, 1.08f, -1.25f + dy, 0.92f, 0.05f + dy);
-        if (C.hs == hsHime)
+        if (C.hs == hsBoyShort || C.hs == hsBoySpiky)
+        {
+            static const float bp[][4] = {
+                { 0.86f, -0.25f, 0.78f, 0.05f }, { 0.68f, -0.2f, 0.55f, -0.15f }, { 0.5f, -0.05f, 0.38f, 0.14f },
+                { 0.3f, -0.15f, 0.16f, -0.2f }, { 0.08f, 0.0f, -0.05f, 0.16f }, { -0.12f, -0.12f, -0.24f, -0.18f },
+                { -0.36f, 0.0f, -0.46f, 0.12f }, { -0.55f, -0.15f, -0.66f, -0.12f }, { -0.78f, 0.0f, -0.84f, 0.08f }, { -0.88f, -0.05f, -0.92f, 0.05f },
+            };
+            for (const auto& q : bp) quadTo(q[0], q[1] + dy, q[2], q[3] + dy);
+        }
+        else if (C.hs == hsHime)
         {
             lineTo(0.86f, -0.02f + dy); lineTo(0.7f, 0.04f + dy);
             for (int k = 0; k < 8; ++k) { const float x0 = 0.7f - k * 0.175f; lineTo(x0 - 0.08f, -0.06f + dy); lineTo(x0 - 0.175f, 0.03f + dy); }
@@ -1315,7 +1709,7 @@ private:
         if (C.hs != hsBraids)
             for (int s = -1; s <= 1; s += 2)
             {
-                const float len = (C.hs == hsHime) ? 0.85f : (C.hs == hsBob ? 0.95f : 1.25f);
+                const float len = (C.hs == hsHime) ? 0.85f : (C.hs == hsBob ? 0.95f : ((C.hs == hsBoyShort || C.hs == hsBoySpiky) ? 0.5f : 1.25f));
                 const float sw = fHairSway * len;
                 beginPath();
                 moveTo(s * 0.72f, -0.45f);
@@ -1437,6 +1831,20 @@ private:
             fillColor(Color(255, 255, 255, 0.9f)); drawFlower(x + 0.2f, y + 0.08f, 0.12f);
             break;
         }
+        case acHeadset:
+        {
+            lineCap(ROUND);
+            beginPath(); arc(0, -0.08f, 1.0f, kPi + 0.25f, 2 * kPi - 0.25f, CW); strokeWidth(0.06f); strokeColor(Color(50, 52, 64)); stroke();
+            beginPath(); arc(0, -0.08f, 1.0f, kPi + 0.35f, 2 * kPi - 0.35f, CW); strokeWidth(0.015f); strokeColor(hexc(C.accent)); stroke();
+            for (int sd = -1; sd <= 1; sd += 2)
+            {
+                beginPath(); ellipse(sd * 0.93f, 0.14f, 0.13f, 0.17f); fillColor(Color(52, 54, 68)); fill();
+                beginPath(); ellipse(sd * 0.93f, 0.14f, 0.07f, 0.1f); fillColor(hexc(C.accent, 0.6f + 0.4f * std::sin(fT * 3.f))); fill();
+            }
+            beginPath(); moveTo(-0.9f, 0.25f); quadTo(-0.75f, 0.62f, -0.3f, 0.66f); strokeWidth(0.025f); strokeColor(Color(50, 52, 64)); stroke();
+            beginPath(); circle(-0.27f, 0.66f, 0.045f); fillColor(Color(40, 40, 50)); fill();
+            break;
+        }
         case acHeaddress:
         {
             // black lace headdress with a red rose
@@ -1480,13 +1888,22 @@ private:
         {
             const int ci = clampi((int)std::lround(fParams[pInstrument]), 0, kNumInstruments - 1);
             static const char* const eras[3] = { "\xE2\x99\xAA PC-98 / 90s FM", "\xE2\x99\xAA Windows XP / 2000s VN", "\xE2\x99\xAA My samples" };
-            label(250, 30, eras[eraOf(ci)], 13.f, hexc(C.accent), ALIGN_LEFT | ALIGN_BASELINE);
-            label(440, 30, "FM \xE2\x99\xA5 samples \xE2\x99\xA5 drums", 11.f, Color(120, 90, 130), ALIGN_LEFT | ALIGN_BASELINE);
+            label(250, 30, fParams[pVocalMode] > 0.5f ? "\xE2\x99\xAA Vocal stage" : eras[eraOf(ci)], 13.f, hexc(C.accent), ALIGN_LEFT | ALIGN_BASELINE);
         }
 
         for (int i = 0; i < fCtlCount; ++i)
         {
             const Control& c = fCtl[i];
+            if (c.type == ctToggle && c.param == pVocalMode)
+            {
+                const bool on = fParams[pVocalMode] > 0.5f, hv = hover(c.b);
+                beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 13);
+                if (on) fillPaint(linearGradient(c.b.x, 0, c.b.x + c.b.w, 0, hexc(0xff5fa8), hexc(0x46a8ff)));
+                else fillColor(hv ? Color(255, 230, 242) : Color(255, 255, 255, 0.9f));
+                fill(); strokeWidth(1.5f); strokeColor(on ? Color(255, 255, 255) : hexc(C.accent, 0.8f)); stroke();
+                label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, on ? "\xE2\x99\xAB VOCAL ON" : "\xE2\x99\xAA VOCAL", 13.f, on ? Color(255, 255, 255) : hexc(C.accent), ALIGN_CENTER | ALIGN_MIDDLE);
+                continue;
+            }
             if (c.type != ctAction) continue;
             const bool h = hover(c.b);
             beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 13);
@@ -1495,7 +1912,7 @@ private:
             strokeWidth(1.5f); strokeColor(Color(255, 255, 255, 0.9f)); stroke();
             label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, c.label, 13.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
         }
-        label(940, 30, "v4.0", 11.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
+        label(940, 30, "v5.0", 11.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
     }
 
     void pill(const Box& b, bool sel, bool hv, uint32_t accent, float r = 11.f)
@@ -1589,6 +2006,9 @@ private:
         const ParamInfo& p = kParams[c.param];
         if (p.unit[0] == 'd') std::snprintf(buf, sizeof(buf), "%.1f dB", fParams[c.param]);
         else if (c.param == pRelease) std::snprintf(buf, sizeof(buf), "x%.2f", fParams[c.param]);
+        else if (c.param == pVGender) std::snprintf(buf, sizeof(buf), "%s", fParams[c.param] < 0.35f ? "male" : (fParams[c.param] > 0.65f ? "female" : "neutral"));
+        else if (c.param == pVFormant) std::snprintf(buf, sizeof(buf), "%+.2f", fParams[c.param]);
+        else if (c.param == pVVibRate) std::snprintf(buf, sizeof(buf), "%.1f Hz", fParams[c.param]);
         else if (p.max <= 2.f) std::snprintf(buf, sizeof(buf), "%d%%", (int)std::lround(fParams[c.param] / p.max * 100));
         else std::snprintf(buf, sizeof(buf), "%.0f %s", fParams[c.param], p.unit);
         label(cx, cy + r + 30, buf, 10.f, Color(150, 110, 160), ALIGN_CENTER | ALIGN_BASELINE);
@@ -1597,9 +2017,9 @@ private:
     void drawSoundPanel(const CharacterDef& C)
     {
         glassPanel(700, 56, 244, 390, C.accent);
-        panelTitle(712, 72, "SOUND", C.accent);
+        panelTitle(712, 72, fParams[pVocalMode] > 0.5f ? "VOICE" : "SOUND", C.accent);
         for (int i = 0; i < fCtlCount; ++i)
-            if (fCtl[i].type == ctKnob && fCtl[i].param != pDrumVolume) drawKnob(fCtl[i], C.accent);
+            if (fCtl[i].type == ctKnob && fCtl[i].param != pDrumVolume && visible(fCtl[i])) drawKnob(fCtl[i], C.accent);
     }
 
     void drawTextbox(const CharacterDef& C, int inst)
@@ -1788,6 +2208,11 @@ private:
     int fForceBlink = -1, fForceMouth = -1;
     bool fExport = false, fExportGirl = false, fExportWhite = false;
     bool fPixelUI = true, fPrevPixel = true;
+    float fHeroU = 92.f, fHeroY = 214.f;
+    bool fDrawingIdol = false, fEditing = false, fForceVocal = false;
+    int fIdolShown = -1, fPrevIdol = 0; float fIdolSwitchT = -10;
+    std::string fLyrics, fEditBuf;
+    std::vector<Syllable> fSyl;
     NanoImage fPxBgImg[kPxCount];
     NanoImage fPxGirlImg[kPxCount][3];
     bool fEditor = false;

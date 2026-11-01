@@ -4,9 +4,9 @@
 
 namespace retrofm {
 
-enum HairStyle { hsLong, hsTwintails, hsHime, hsWavy, hsPonytail, hsBob, hsBraids, hsBun };
-enum Accessory { acRibbon, acBell, acNone, acSnow, acScrunchie, acHeadphones, acGlasses, acKanzashi, acHeaddress };
-enum Outfit    { ofSailor, ofBlazer, ofSweater, ofHoodie, ofVest, ofKimono, ofGothic };
+enum HairStyle { hsLong, hsTwintails, hsHime, hsWavy, hsPonytail, hsBob, hsBraids, hsBun, hsSideTail, hsBoyShort, hsBoySpiky };
+enum Accessory { acRibbon, acBell, acNone, acSnow, acScrunchie, acHeadphones, acGlasses, acKanzashi, acHeaddress, acHeadset };
+enum Outfit    { ofSailor, ofBlazer, ofSweater, ofHoodie, ofVest, ofKimono, ofGothic, ofIdolDress, ofIdolJacket };
 enum Celestial { ceSun, ceSunset, ceMoon, ceCloudy, ceRedMoon };
 enum Particle  { ptSakura, ptSnow, ptMaple, ptLeaf, ptSparkle };
 
@@ -20,6 +20,7 @@ struct CharacterDef {
     uint32_t skyTop, skyBottom, horizon;
     Celestial ce; Particle pt;
     uint32_t particle, accent;
+    int male;   // 0 = girl, 1 = boy
 };
 
 static constexpr int kNumChars = 9;
@@ -69,6 +70,34 @@ static const CharacterDef kChars[kNumChars] = {
      0x3a2448, 0x140a1c, 0x8a6aa8, 0xd8203a, 0x560010,
      0x1c1620, 0xf2eef4, 0xb0102a, hsLong, acHeaddress, ofGothic,
      0x0b0610, 0x3a1020, 0x24101c, ceRedMoon, ptSakura, 0x8a1028, 0xd83a5a},
+};
+
+// ------------------------------------------------------------------ vocal idols (original characters)
+static const CharacterDef kIdols[6] = {
+    {"Сора", "яркий поп",
+     0xf2dc9a, 0xa07a30, 0xfff6d0, 0x3a9cff, 0x0c3a8a,
+     0xf4f8ff, 0x3a7ce0, 0x46a8ff, hsSideTail, acHeadset, ofIdolDress,
+     0x0a0820, 0x241040, 0x1a1030, ceMoon, ptSparkle, 0xbfe4ff, 0x46a8ff, 0},
+    {"Мэй", "милый голос с придыханием",
+     0xff9cc8, 0xb44a80, 0xffd8ea, 0xd23a8a, 0x5a0a3a,
+     0xffeef6, 0xff6fae, 0xff5fa8, hsBob, acHeadset, ofIdolDress,
+     0x0a0820, 0x241040, 0x1a1030, ceMoon, ptSparkle, 0xffc0dc, 0xff5fa8, 0},
+    {"Рэйна", "холодный альт",
+     0x5a3a8a, 0x221238, 0x9a7ad0, 0xe0a828, 0x6a4200,
+     0x1e1828, 0x7a4ad0, 0xb07cff, hsLong, acHeadset, ofIdolDress,
+     0x0a0820, 0x241040, 0x1a1030, ceMoon, ptSparkle, 0xd8c0ff, 0xb07cff, 0},
+    {"Хару", "тёплая баллада",
+     0xe08a4a, 0x8a4418, 0xffc890, 0x3aa860, 0x0c4a24,
+     0xfff4d0, 0xffb347, 0xff8a3a, hsBraids, acHeadset, ofIdolDress,
+     0x0a0820, 0x241040, 0x1a1030, ceMoon, ptSparkle, 0xffe0a0, 0xffb347, 0},
+    {"Хаято", "рок-тенор",
+     0xc8323a, 0x5a0c14, 0xff7a70, 0xe0a028, 0x6a3c00,
+     0x1c1c24, 0xff4a4a, 0xff4a4a, hsBoySpiky, acHeadset, ofIdolJacket,
+     0x0a0820, 0x241040, 0x1a1030, ceMoon, ptSparkle, 0xffb0a0, 0xff4a4a, 1},
+    {"Ю", "мягкий голос",
+     0xd0cce6, 0x7a76a0, 0xffffff, 0x4ab0d0, 0x0a4a62,
+     0xf6f8ff, 0x4a8ae0, 0x6ad0ff, hsBoyShort, acHeadset, ofIdolJacket,
+     0x0a0820, 0x241040, 0x1a1030, ceMoon, ptSparkle, 0xc0ecff, 0x6ad0ff, 1},
 };
 
 // instrument -> heroine + her line

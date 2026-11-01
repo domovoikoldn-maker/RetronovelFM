@@ -8,8 +8,10 @@ enum Param {
     pInstrument = 0, pVolume, pBrightness, pRelease, pVibDepth, pVibRate,
     pLofi, pChorus, pReverb, pBendRange, pTranspose, pVelSens,
     pDrumMode, pDrumPattern, pDrumKit, pDrumVolume, pDrumFill,
+    // vocal (singing) mode
+    pVocalMode, pIdol, pVGender, pVFormant, pVBreath, pVVib, pVVibRate, pVBright, pVGlide,
     // outputs (DSP -> UI)
-    pOutActivity, pOutDrumStep, pOutBeat,
+    pOutActivity, pOutDrumStep, pOutBeat, pOutMouth, pOutVowel, pOutSyll,
     kParamCount
 };
 
@@ -33,9 +35,21 @@ static const ParamInfo kParams[kParamCount] = {
     {"Drum Kit",         "drumkit",    "",      0,    0,    3, true,  false},
     {"Drum Volume",      "drumvolume", "dB",   -9,  -40,    6, false, false},
     {"Drum Fills",       "drumfill",   "",      1,    0,    1, true,  false},
+    {"Vocal Mode",       "vocalmode",  "",      0,    0,    1, true,  false},
+    {"Idol",             "idol",       "",      0,    0,    5, true,  false},
+    {"Voice Gender",     "vgender",    "",   0.9f,    0,    1, false, false},
+    {"Voice Size",       "vformant",   "",   0.1f,   -1,    1, false, false},
+    {"Breath",           "vbreath",    "",   0.3f,    0,    1, false, false},
+    {"Vocal Vibrato",    "vvib",       "cents", 30,   0,  100, false, false},
+    {"Vibrato Speed",    "vvibrate",   "Hz",  5.6f,   3,    8, false, false},
+    {"Voice Bright",     "vbright",    "",   0.6f,    0,    1, false, false},
+    {"Glide",            "vglide",     "ms",   60,    0,  300, false, false},
     {"Activity",         "activity",   "",      0,    0,    1, false, true},
     {"Drum Step",        "drumstep",   "",     -1,   -1,   15, true,  true},
     {"Beat",             "beat",       "",      0,    0,    1, false, true},
+    {"Mouth",            "mouth",      "",      0,    0,    1, false, true},
+    {"Vowel",            "vowel",      "",      0,    0,    5, true,  true},
+    {"Syllable",         "syllable",   "",     -1,   -1, 1023, true,  true},
 };
 
 // eras: 0..23 PC-98 FM, 24..53 Windows XP / 2000s samples, 54..57 user sample slots
@@ -65,6 +79,27 @@ static const char* const kDrumModeNames[3] = { "Off", "Sync to DAW", "Always" };
 static const char* const kDrumKitNames[4]  = { "PC-98 FM", "Analog 808", "8-bit Lo-Fi", "Live 2000s" };
 static const char* const kUserPatternNames[4] = { "User 1", "User 2", "User 3", "User 4" };
 static constexpr int kNumPresetPatterns = 12, kNumPatterns = 16;
+
+// ---------------------------------------------------------------- vocal idols (voice presets)
+struct IdolVoice { const char* name; float gender, formant, breath, vib, vibRate, bright, glide; int octave; };
+static constexpr int kNumIdols = 6;
+static const IdolVoice kIdolVoices[kNumIdols] = {
+    // name      gender formant breath vib  rate  bright glide octave(suggested)
+    {"Sora",     0.95f,  0.15f, 0.20f,  35, 5.8f, 0.80f,  50, 5},   // bright pop
+    {"Mei",      1.00f,  0.35f, 0.45f,  20, 6.2f, 0.65f,  40, 5},   // sweet, breathy, high
+    {"Reina",    0.80f, -0.10f, 0.25f,  45, 5.2f, 0.55f,  90, 4},   // cool alto
+    {"Haru",     0.90f,  0.05f, 0.40f,  25, 5.0f, 0.45f, 110, 4},   // warm ballad
+    {"Hayato",   0.05f, -0.10f, 0.15f,  40, 5.4f, 0.75f,  60, 3},   // rock tenor
+    {"Yuu",      0.30f,  0.10f, 0.35f,  25, 5.6f, 0.55f,  80, 3},   // soft boy voice
+};
+static const char* const kLyricPresets[6][2] = {
+    {"La la", "la la la la la la la la ra ra ra ra"},
+    {"A I U E O", "a i u e o ka ki ku ke ko sa shi su se so"},
+    {"Sakura", "sa ku ra sa ku ra ya yo i no so ra wa mi wa ta su ka gi ri"},
+    {"Yume", "yu me no na ka de ki mi wo ma tsu - hi ka ri no mi chi"},
+    {"По-русски", "мы по-ём вме-сте до-ро-га све-тла-я"},
+    {"Doo-wop", "du bi du ba shu bi du ba da ba da"},
+};
 
 // ---------------------------------------------------------------- drum patterns
 // lanes: Kick, Snare, Closed hat, Open hat, Clap, Low tom, High tom, Rim, Crash

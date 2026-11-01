@@ -10,6 +10,7 @@
 #include "RetroData.hpp"
 #include "RetroDrums.hpp"
 #include "RetroSampler.hpp"
+#include "RetroVocal.hpp"
 #include <string>
 
 namespace retrofm {
@@ -120,7 +121,7 @@ public:
         std::memset(chb, 0, sizeof(chb));
         cw = 0; cph = vph = 0; hcnt = 0; held = 0;
         for (auto& v : voices) v.active = false;
-        drums.setSampleRate(sr); seq.setSampleRate(sr); sampler.setSampleRate(sr);
+        drums.setSampleRate(sr); seq.setSampleRate(sr); sampler.setSampleRate(sr); vocal.setSampleRate(sr);
         update();
     }
 
@@ -137,20 +138,23 @@ public:
         }
         if (st == 0x90 && m3 > 0) {
             const int inst = (int)std::floor(params[pInstrument] + 0.5f);
-            if (inst < kNumFM) noteOn(m2, m3);
+            if (params[pVocalMode] > 0.5f) vocal.noteOn(m2 + (int)params[pTranspose], m3);
+            else if (inst < kNumFM) noteOn(m2, m3);
             else sampler.noteOn(inst, m2, m3, params[pTranspose]);
         }
-        else if (st == 0x80 || (st == 0x90 && m3 == 0)) { noteOff(m2); sampler.noteOff(m2, pedal); }
+        else if (st == 0x80 || (st == 0x90 && m3 == 0)) { noteOff(m2); sampler.noteOff(m2, pedal); vocal.noteOff(m2 + (int)params[pTranspose]); }
         else if (st == 0xE0) { bend = ((m3 * 128 + m2) - 8192) / 8192.0; bendmul = std::pow(2.0, bend * params[pBendRange] / 12.0); }
         else if (st == 0xB0) {
             if (m2 == 1) modwheel = m3 / 127.0;
             else if (m2 == 64) { bool p = m3 >= 64; if (pedal && !p) pedalUpAll(); pedal = p; }
-            else if (m2 == 120 || m2 == 123) { allOff(); sampler.allOff(); }
+            else if (m2 == 120 || m2 == 123) { allOff(); sampler.allOff(); vocal.allOff(); }
         }
     }
 
     // call once per audio block with host transport info
     void transport(bool playing, bool posValid, double posSteps, double bpm) {
+        if (playing && !wasPlaying) vocal.rewind();      // lyrics restart with the song
+        wasPlaying = playing;
         seq.transport((int)params[pDrumMode], playing, posValid, posSteps, bpm);
     }
 
@@ -158,6 +162,14 @@ public:
     float outActivity() const { return (float)activity; }
     float outDrumStep() const { return (float)seq.currentStep(); }
     float outBeat() const { return drums.pulse; }
+    float outMouth() const { return vocal.mouthOpen(); }
+    float outVowel() const { return (float)vocal.vowel(); }
+    float outSyll() const { return (float)vocal.currentSyllable(); }
+
+    // ---- vocal lyrics (call from a non-audio thread)
+    void setLyrics(const char* text) { vocal.setLyrics(text); }
+    const std::string& getLyrics() const { return vocal.lyrics(); }
+    void rewindLyrics() { vocal.rewind(); }
 
     void process(float* outL, float* outR, uint32_t n) {
         for (uint32_t s = 0; s < n; ++s) { float l, r; tick(l, r); outL[s] = l; outR[s] = r; }
@@ -169,6 +181,9 @@ public:
         double mix = 0, act = 0;
         float sL = 0, sR = 0;
         act += sampler.tick(pmul, sL, sR) * 0.8;
+        const float vox = vocal.tick(bendmul);
+        sL += vox * 0.75f; sR += vox * 0.75f;
+        act += vocal.mouthOpen();
         for (auto& v : voices) {
             if (!v.active) continue;
             const double base = v.inc * pmul;
@@ -305,6 +320,14 @@ private:
         bendmul = std::pow(2.0, bend * params[pBendRange] / 12.0);
         seq.setPattern((int)std::floor(params[pDrumPattern] + 0.5f));
         sampler.setRelease(params[pRelease]);
+        {
+            VoiceParams vp;
+            vp.gender = params[pVGender]; vp.formant = params[pVFormant]; vp.breath = params[pVBreath];
+            vp.vib = params[pVVib]; vp.vibRate = params[pVVibRate]; vp.bright = params[pVBright]; vp.glide = params[pVGlide];
+            vocal.setParams(vp);
+            vocal.setRelease(params[pRelease]);
+            if (params[pVocalMode] < 0.5f) vocal.allOff();
+        }
         sampler.setBrightness(params[pBrightness]);
         drums.setKit((int)std::floor(params[pDrumKit] + 0.5f));
         drumGain = std::pow(10.0, params[pDrumVolume] / 20.0);
@@ -341,6 +364,8 @@ private:
     double vph = 0, vrateInc = 0, cph = 0, bend = 0, bendmul = 1, modwheel = 0;
     bool pedal = false; uint32_t serial = 0;
     Sampler sampler;
+    VocalSynth vocal;
+    bool wasPlaying = false;
     DrumPattern pats[kNumPatterns];
     char userLanes[4][kDrumLanes][17];
     std::string userPath[kNumUser];

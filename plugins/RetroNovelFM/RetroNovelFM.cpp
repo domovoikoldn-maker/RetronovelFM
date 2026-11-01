@@ -12,7 +12,7 @@ class RetroNovelFM : public Plugin
 {
 public:
     RetroNovelFM()
-        : Plugin(retrofm::kParamCount, 0, 12),
+        : Plugin(retrofm::kParamCount, 0, 13),
           engine(new retrofm::Engine())
     {
         engine->setSampleRate(getSampleRate());
@@ -23,7 +23,7 @@ protected:
     const char* getDescription() const override { return "FM synth + drum machine in the style of PC-98 / 90s visual novels and RPG Maker music"; }
     const char* getMaker() const override { return "RetroNovel"; }
     const char* getLicense() const override { return "ISC"; }
-    uint32_t getVersion() const override { return d_version(4, 0, 0); }
+    uint32_t getVersion() const override { return d_version(5, 0, 0); }
 
     static void setEnum(Parameter& p, const char* const* names, int count)
     {
@@ -64,8 +64,16 @@ protected:
             break;
         }
         case retrofm::pDrumFill:
+        case retrofm::pVocalMode:
             p.hints |= kParameterIsBoolean;
             break;
+        case retrofm::pIdol:
+        {
+            const char* names[retrofm::kNumIdols];
+            for (int i = 0; i < retrofm::kNumIdols; ++i) names[i] = retrofm::kIdolVoices[i].name;
+            setEnum(p, names, retrofm::kNumIdols);
+            break;
+        }
         }
     }
 
@@ -76,6 +84,9 @@ protected:
         case retrofm::pOutActivity: return engine->outActivity();
         case retrofm::pOutDrumStep: return engine->outDrumStep();
         case retrofm::pOutBeat:     return engine->outBeat();
+        case retrofm::pOutMouth:    return engine->outMouth();
+        case retrofm::pOutVowel:    return engine->outVowel();
+        case retrofm::pOutSyll:     return engine->outSyll();
         default:                    return engine->getParam((int)index);
         }
     }
@@ -90,6 +101,11 @@ protected:
     // smp1..4 = user sample paths, root1..4 = their root notes, pat1..4 = user drum patterns
     void initState(uint32_t index, State& st) override
     {
+        if (index == 12)
+        {
+            st.key = "lyrics"; st.defaultValue = retrofm::kLyricPresets[0][1]; st.hints = 0; st.label = "Lyrics";
+            return;
+        }
         const int k = (int)(index % 4) + 1;
         char key[16];
         if (index < 4)
@@ -114,6 +130,8 @@ protected:
 
     void setState(const char* key, const char* value) override
     {
+        if (key && value && !std::strcmp(key, "lyrics")) { engine->setLyrics(value); return; }
+        if (key && !std::strcmp(key, "rewind")) { engine->rewindLyrics(); return; }
         if (!key || !value || std::strlen(key) < 4) return;
         const int k = key[std::strlen(key) - 1] - '1';
         if (k < 0 || k > 3) return;
@@ -124,6 +142,7 @@ protected:
 
     String getState(const char* key) const override
     {
+        if (key && !std::strcmp(key, "lyrics")) return String(engine->getLyrics().c_str());
         if (!key || std::strlen(key) < 4) return String();
         const int k = key[std::strlen(key) - 1] - '1';
         if (k < 0 || k > 3) return String();
