@@ -1,0 +1,69 @@
+name: Build plugin
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  DPF_COMMIT: 4238e1c7f0351bbe488d79f0899c540543ac7583
+
+jobs:
+  windows:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get DPF
+        run: |
+          git clone --recursive https://github.com/DISTRHO/DPF dpf
+          git -C dpf checkout $DPF_COMMIT
+          git -C dpf submodule update --init --recursive
+      - name: Install MinGW
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64
+      - name: Build Windows x64
+        run: make WINDOWS=true CC=x86_64-w64-mingw32-gcc-posix CXX=x86_64-w64-mingw32-g++-posix AR=x86_64-w64-mingw32-ar -j4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RetroNovelFM-Windows-x64
+          path: |
+            bin/RetroNovelFM.vst3
+            bin/RetroNovelFM-vst.dll
+            bin/RetroNovelFM.clap
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get DPF
+        run: |
+          git clone --recursive https://github.com/DISTRHO/DPF dpf
+          git -C dpf checkout $DPF_COMMIT
+          git -C dpf submodule update --init --recursive
+      - name: Build macOS universal
+        run: make MACOS_UNIVERSAL=true -j4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RetroNovelFM-macOS
+          path: |
+            bin/RetroNovelFM.vst3
+            bin/RetroNovelFM.vst
+            bin/RetroNovelFM.clap
+            bin/RetroNovelFM.component
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get DPF
+        run: |
+          git clone --recursive https://github.com/DISTRHO/DPF dpf
+          git -C dpf checkout $DPF_COMMIT
+          git -C dpf submodule update --init --recursive
+      - name: Build Linux x64
+        run: make -j4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RetroNovelFM-Linux-x64
+          path: |
+            bin/RetroNovelFM.vst3
+            bin/RetroNovelFM-vst.so
+            bin/RetroNovelFM.clap
