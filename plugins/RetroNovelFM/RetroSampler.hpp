@@ -9,6 +9,7 @@
 #include <vector>
 #include "RetroData.hpp"
 #include "samples/SampleIndex.hpp"
+#include "samples/DrumKitIndex.hpp"
 
 namespace retrofm {
 
@@ -25,6 +26,13 @@ public:
     }
     const std::vector<Zone>& set(int i) const { return sets[i]; }
     const Zone& drum(int lane) const { return drums[lane]; }
+    // recorded kits: slot 0 rock, 1 pop, 2 brush, 3 lo-fi
+    const float* kitData(int slot, int lane, int layer, int rr, uint32_t& len) const {
+        if (slot < 0 || slot >= kNumSampleKits) { len = 0; return nullptr; }
+        const uint32_t* z = kDrumKitZones[slot][lane][layer][rr];
+        len = z[1];
+        return len ? kitBuf.data() + z[0] : nullptr;
+    }
 
 private:
     SampleBank() {
@@ -55,6 +63,11 @@ private:
         for (int l = 0; l < 9; ++l) dtotal = std::max(dtotal, kDrumZones[l].offset + kDrumZones[l].length);
         drumData.resize(dtotal + 4);
         for (uint32_t k = 0; k < dtotal; ++k) drumData[k] = lut[kSmp_drums[k]];
+        uint32_t ktotal = 0;
+        for (int k = 0; k < kNumSampleKits; ++k) for (int l = 0; l < 9; ++l) for (int a = 0; a < 2; ++a) for (int b = 0; b < 2; ++b)
+            ktotal = std::max(ktotal, kDrumKitZones[k][l][a][b][0] + kDrumKitZones[k][l][a][b][1]);
+        kitBuf.resize(ktotal + 4);
+        for (uint32_t k = 0; k < ktotal; ++k) kitBuf[k] = lut[kSmp_drumkits[k]];
         for (int l = 0; l < 9; ++l) {
             drums[l].data = drumData.data() + kDrumZones[l].offset; drums[l].len = kDrumZones[l].length;
             drums[l].rate = 32000; drums[l].gain = kDrumZones[l].gain;
@@ -62,7 +75,7 @@ private:
     }
     std::vector<std::vector<float>> data;
     std::vector<std::vector<Zone>> sets;
-    std::vector<float> drumData;
+    std::vector<float> drumData, kitBuf;
     Zone drums[9];
 };
 
@@ -148,13 +161,13 @@ static const XPInst kXP[kNumXP] = {
 // ROCK / BATTLE (inst 58..77)
 static const XPInst kRock[kNumRock] = {
     // src        layers  a      d     s     r      cut    vc    det  vib  rev  crush rnd oct  level  drive chord mute sust rhythm arp
-    {srcDistGtr, NOL,    0.0f,  9,  1.0f, 0.15f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.85f, 6.0f, 1, 0.0f, 0.0f, 0, 0},   // Power Chords
-    {srcDistGtr, NOL,    0.0f,  9,  1.0f, 0.12f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.85f, 6.0f, 0, 0.0f, 0.0f, 0, 0},   // Dist Guitar
-    {srcDistGtr, NOL,    0.0f,  9,  1.0f, 0.25f, 20000, 0.0f,  0,  22, false, 0, 0, 0, 0.75f, 9.0f, 0, 0.0f, 1.0f, 0, 0},   // Lead Guitar
-    {srcDistGtr, NOL,    0.0f,  9,  1.0f, 0.40f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 1.00f, 0.6f, 0, 0.0f, 0.0f, 0, 0},   // Clean Guitar
-    {srcDistGtr, NOL,    0.0f,  9,  1.0f, 0.06f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.90f, 6.0f, 1, 1.0f, 0.0f, 0, 0},   // Palm Mute
-    {srcDistGtr, NOL,    0.0f,  9,  1.0f, 0.04f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.90f, 6.0f, 1, 1.0f, 0.0f, 16, 0},  // Chug 16th
-    {srcBassGtr, NOL,    0.0f,  9,  1.0f, 0.12f,  2600, 0.4f,  0,   0, false, 0, 0, 0, 1.10f, 1.5f, 0, 0.0f, 0.0f, 0, 0},   // Bass Guitar
+    {srcSample, L1("egtr"),  0.0f,  9,  1.0f, 0.15f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.80f, 7.0f, 1, 0.0f, 0.0f, 0, 0},   // Power Chords
+    {srcSample, L1("egtr"),  0.0f,  9,  1.0f, 0.12f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.80f, 7.0f, 0, 0.0f, 0.0f, 0, 0},   // Dist Guitar
+    {srcSample, L1("egtr"),  0.0f,  9,  1.0f, 0.25f, 20000, 0.0f,  0,  22, false, 0, 0, 0, 0.75f, 10.0f, 0, 0.0f, 1.0f, 0, 0},  // Lead Guitar
+    {srcSample, L1("egtr"),  0.0f, 2.8f, 0.0f, 0.40f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 1.30f, 0.6f, 0, 0.0f, 0.0f, 0, 0},   // Clean Guitar
+    {srcSample, L1("egtrf"), 0.0f, 0.22f, 0.0f, 0.05f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.85f, 7.0f, 1, 1.0f, 0.0f, 0, 0},  // Palm Mute
+    {srcSample, L1("egtrf"), 0.0f, 0.16f, 0.0f, 0.04f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.85f, 7.0f, 1, 1.0f, 0.0f, 16, 0}, // Chug 16th
+    {srcSample, L1("ebass"), 0.0f,  9,  1.0f, 0.12f,  3800, 0.4f,  0,   0, false, 0, 0, 0, 1.25f, 0.8f, 0, 0.0f, 0.0f, 0, 0},   // Bass Guitar
     {srcOrgan,   NOL,  0.005f,  9,  1.0f, 0.08f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.55f, 2.5f, 0, 0.0f, 0.0f, 0, 0},   // Rock Organ
     {srcSaw,     NOL,   0.01f,  9,  1.0f, 0.20f,  6500, 0.3f, 12,  15, false, 0, 0, 0, 0.55f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Synth Lead
     {srcSaw,     NOL,   0.45f,  9,  1.0f, 1.00f,  4500, 0.0f, 28,   0, false, 0, 0, 0, 0.45f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Supersaw Pad
@@ -166,11 +179,11 @@ static const XPInst kRock[kNumRock] = {
     {srcSample, {{"cspic", 0, 56, 1.0f, 0}, {"vspic", 57, 127, 1.0f, 0}, {nullptr,0,0,0,0}},
                          0.0f,   1,  1.0f, 0.10f, 20000, 0.4f,  0,   0, false, 0, 0, 0, 1.30f, 0.0f, 0, 0.0f, 0.0f, 8, 0},   // Str Ostinato
     {srcSample, L1("timp"),  0.0f, 9, 1.0f, 1.00f, 20000, 0.3f,  0,   0, false, 0, 0, 0, 1.40f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Timpani
-    {srcDrum,    NOL,    0.0f, 0.55f, 0.0f, 0.60f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.75f, 1.5f, 0, 0.0f, 0.0f, 0, 0},  // Taiko
+    {srcSample, L1("taiko"), 0.0f,  9,  1.0f, 0.80f, 20000, 0.3f,  0,   0, false, 0, 0, 0, 2.10f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Taiko
     {srcSample, {{"tpstac", 0, 127, 1.0f, 0}, {"tbstac", 0, 127, 0.9f, -12}, {"vspic", 0, 127, 0.8f, 0}},
                          0.0f,   1,  1.0f, 0.30f, 20000, 0.3f,  0,   0, false, 0, 0, 0, 1.10f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Orchestra Hit
     {srcChoir,   NOL,   0.05f,  1,  1.0f, 0.60f,  6000, 0.2f, 14,   0, false, 0, 0, 0, 1.25f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Battle Choir
-    {srcDrum,    NOL,    0.0f, 0.35f, 0.0f, 0.40f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.75f, 0.6f, 0, 0.0f, 0.0f, 0, 0},  // Epic Toms
+    {srcSample, L1("etoms"), 0.0f,  9,  1.0f, 0.60f, 20000, 0.3f,  0,   0, false, 0, 0, 0, 2.20f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Epic Toms
     {srcSquare,  NOL,    0.0f,  9,  1.0f, 0.08f, 20000, 0.0f,  0,  10, false, 0, 0, 0, 0.85f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Chip Square
 };
 #undef L1
@@ -235,7 +248,15 @@ public:
                     if (!L.set || setIdx[slot][l] < 0 || note < L.lo || note > L.hi) continue;
                     const Zone* z = pick(setIdx[slot][l], n + L.pitch);
                     if (!z) continue;
-                    if (I.detune > 0) {
+                    if (I.chord) {
+                        // power chord: root, fifth, octave through one amp
+                        static const double iv[3] = { 0, 7, 12 };
+                        static const float  ig[3] = { 1.0f, 0.85f, 0.6f };
+                        for (int c = 0; c < 3; ++c) {
+                            const Zone* zc = pick(setIdx[slot][l], n + L.pitch + iv[c]);
+                            if (zc) addPlay(v, zc, n + L.pitch + iv[c] + rnd, 0, L.gain * ig[c], 0.f, false);
+                        }
+                    } else if (I.detune > 0) {
                         addPlay(v, z, n + L.pitch + rnd - I.detune / 200.0, 0, L.gain * 0.75f, -0.6f, I.reverse);
                         addPlay(v, z, n + L.pitch + rnd + I.detune / 200.0, 0, L.gain * 0.75f, 0.6f, I.reverse);
                     } else addPlay(v, z, n + L.pitch + rnd, 0, L.gain, 0.f, I.reverse);
@@ -245,6 +266,8 @@ public:
                     }
                 }
                 if (v.np == 0) return;
+                std::memset(v.cab, 0, sizeof(v.cab));
+                v.pre = 0;
             } else if (I.src == srcChoir) {
                 v.freq = 440.0 * std::pow(2.0, (n - 69) / 12.0);
                 for (int k = 0; k < 3; ++k) v.ph[k] = (k * 0.31);
@@ -350,6 +373,19 @@ public:
                     ++alive;
                 }
                 if (!alive) { v.active = false; continue; }
+                if (D.drive > 0.f || D.mute > 0.f) {
+                    // guitar amp: (palm-mute damping) -> low cut -> drive -> 2-pole cabinet
+                    float x = (l + r) * 0.5f;
+                    if (D.mute > 0.f) { v.pre += (x - v.pre) * 0.12f; x = v.pre * 1.7f; }
+                    v.cab[0] += (x - v.cab[0]) * 0.008f; x -= v.cab[0];
+                    if (D.drive > 1.f) {
+                        x = std::tanh(x * D.drive * 1.5f + 0.12f) - 0.1194f;
+                        v.cab[1] += (x - v.cab[1]) * 0.42f; v.cab[2] += (v.cab[1] - v.cab[2]) * 0.42f;
+                        v.cab[3] += (v.cab[2] - v.cab[3]) * 0.02f;           // tame boom
+                        x = (v.cab[2] - v.cab[3] * 0.35f) * 0.85f;
+                    } else x = std::tanh(x * (0.8f + D.drive)) * 0.95f;
+                    l = r = x;
+                }
             } else if (v.src == srcChoir) {
                 const double f = v.freq * pm;
                 double saw = 0;
@@ -477,7 +513,7 @@ private:
         double freq = 440, ph[3] = {0,0,0}, fs[3][2] = {{0,0},{0,0},{0,0}}; float cdet = 9;
         double ksLen = 100; int ksPos = 0; float ksPrev = 0, ksDamp = 0.996f, body = 0;
         int nstr = 1; double sLen[3] = {100, 100, 100}; int sPos[3] = {0, 0, 0}; float sPrev[3] = {0, 0, 0};
-        float cab[4] = {0, 0, 0, 0}; double oph[7] = {0, 0, 0, 0, 0, 0, 0}; double t = 0;
+        float cab[4] = {0, 0, 0, 0}, pre = 0; double oph[7] = {0, 0, 0, 0, 0, 0, 0}; double t = 0;
     };
     static inline double blep(double p, double dt) {
         if (p < dt) { const double t = p / dt; return t + t - t * t - 1.0; }

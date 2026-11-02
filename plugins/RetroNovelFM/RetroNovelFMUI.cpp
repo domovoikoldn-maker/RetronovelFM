@@ -12,6 +12,13 @@
 #include <cstdlib>
 #include <string>
 
+namespace retrofm {
+uint32_t winTranslateTyped(uint32_t hostChar);
+bool winCtrlDown();
+bool winKeyVDown();
+bool winLayoutIsCyrillic();
+}
+
 START_NAMESPACE_DISTRHO
 
 using namespace retrofm;
@@ -35,7 +42,8 @@ struct Box {
 enum CtlType { ctSelect, ctKnob, ctToggle, ctAction, ctEraTab, ctLoad, ctClearSmp, ctRootDn, ctRootUp,
                ctEditOpen, ctEditClose, ctEditUser, ctEditLen, ctEditClear, ctEditCopy, ctCell,
                ctIdol, ctLyricPreset, ctLyricEdit, ctLyricRewind, ctLyricRU, ctLyricPaste,
-               ctScenesOpen, ctSceneCard, ctSceneOff, ctScenesClose, ctStoryOpen, ctLesson, ctStoryMenuClose };
+               ctScenesOpen, ctSceneCard, ctSceneOff, ctScenesClose, ctStoryOpen, ctLesson, ctStoryMenuClose,
+               ctGenre, ctGenrePat, ctKitStep };
 // control groups: 0 = always, 1..3 = only on that era tab (FM / XP / user), 10 = drum editor overlay
 enum CtlGroup { gAlways = 0, gFM = 1, gXP = 2, gUser = 3, gEditor = 10, gVocal = 11, gInst = 12, gRock = 13, gScenes = 14, gStoryMenu = 15 };
 enum ActionId { aPrev, aNext, aRandom };
@@ -240,7 +248,7 @@ protected:
             case ctIdol: selectIdol((int)c.value); break;
             case ctLyricPreset: fLyrics = kLyricPresets[(int)c.value][1]; setState("lyrics", fLyrics.c_str()); parseLyrics(fLyrics.c_str(), fSyl); fEditing = false; break;
             case ctLyricEdit:
-                if (!fEditing) { fEditing = true; fEditBuf = fLyrics; getWindow().focus(); }
+                if (!fEditing) { fEditing = true; fEditBuf = fLyrics; getWindow().focus(); if (winLayoutIsCyrillic()) fAutoRu = true; }
                 else if (c.param == 0) commitLyrics();
                 break;
             case ctLyricRewind: setState("lyrics", fLyrics.c_str()); break;
@@ -252,9 +260,31 @@ protected:
             case ctSceneOff: setParam(pScene, 0.f); fScenesOpen = false; break;
             case ctStoryOpen: fStoryMenu = true; fStory = -1; break;
             case ctStoryMenuClose: fStoryMenu = false; break;
+            case ctGenre:
+            {
+                const int g = (int)c.value;
+                setParam(pDrumGenre, (float)g);
+                setParam(pDrumKit, (float)kGenres[g].kit);
+                setParam(pDrumPattern, (float)kGenres[g].pats[0]);
+                fLastPreset = kGenres[g].pats[0];
+                break;
+            }
+            case ctGenrePat:
+            {
+                const int g = clampi((int)std::lround(fParams[pDrumGenre]), 0, kNumGenres - 1);
+                const int pt = kGenres[g].pats[(int)c.value];
+                setParam(pDrumPattern, (float)pt); fLastPreset = pt;
+                break;
+            }
+            case ctKitStep:
+            {
+                const int k = ((int)std::lround(fParams[pDrumKit]) + (int)c.value + kNumKits) % kNumKits;
+                setParam(pDrumKit, (float)k);
+                break;
+            }
             case ctLesson: fStoryMenu = false; startLesson((int)c.value); break;
             case ctSelect:
-                if (c.param == pDrumPattern && c.value < kNumPresetPatterns) fLastPreset = (int)c.value;
+                if (c.param == pDrumPattern && !isUserPattern((int)c.value)) fLastPreset = (int)c.value;
                 if (c.param == pInstrument && fParams[pScene] > 0.5f) setParam(pScene, 0.f);   // picking an instrument leaves the scene
                 setParam(c.param, c.value);
                 break;
@@ -298,9 +328,9 @@ protected:
                 setState(key, val);
                 break;
             }
-            case ctEditOpen: fEditor = true; fEditUser = (int)std::lround(fParams[pDrumPattern]) >= kNumPresetPatterns ? (int)std::lround(fParams[pDrumPattern]) - kNumPresetPatterns : fEditUser; break;
+            case ctEditOpen: { fEditor = true; const int cp = (int)std::lround(fParams[pDrumPattern]); if (isUserPattern(cp)) fEditUser = cp - kFirstUserPattern; else fLastPreset = cp; break; }
             case ctEditClose: fEditor = false; break;
-            case ctEditUser: fEditUser = (int)c.value; setParam(pDrumPattern, (float)(kNumPresetPatterns + fEditUser)); break;
+            case ctEditUser: fEditUser = (int)c.value; setParam(pDrumPattern, (float)(kFirstUserPattern + fEditUser)); break;
             case ctEditLen: fULen[fEditUser] = fULen[fEditUser] == 16 ? 12 : 16; commitPattern(fEditUser); break;
             case ctEditClear:
                 for (int l = 0; l < kDrumLanes; ++l) std::memset(fUL[fEditUser][l], '-', 16);
@@ -349,8 +379,14 @@ protected:
     bool onKeyboard(const KeyboardEvent& ev) override
     {
         if (!ev.press) return fEditing;
-        if ((ev.mod & kModifierControl) && (ev.key == 'v' || ev.key == 'V' || ev.keycode == 0x2F /* 'v' scancode */) && fParams[pVocalMode] > 0.5f)
-        { pasteLyrics(); repaint(); return true; }
+        // Ctrl+V: on a Russian layout the host reports the key as 'м' (or nothing at all)
+        const bool ctrl = (ev.mod & kModifierControl) || winCtrlDown();
+        const bool vKey = ev.key == 'v' || ev.key == 'V' || ev.key == 0x43C || ev.key == 0x41C || ev.key == 22 /* ^V */ || winKeyVDown();
+        if (ctrl && vKey && fParams[pVocalMode] > 0.5f)
+        {
+            if (fT - fLastPasteT > 0.25f) { pasteLyrics(); fLastPasteT = fT; }
+            repaint(); return true;
+        }
         if (!fEditing) return false;
         if (ev.key == kKeyBackspace) { while (!fEditBuf.empty() && (fEditBuf.back() & 0xC0) == 0x80) fEditBuf.pop_back(); if (!fEditBuf.empty()) fEditBuf.pop_back(); }
         else if (ev.key == kKeyEnter) commitLyrics();
@@ -362,13 +398,15 @@ protected:
     bool onCharacterInput(const CharacterInputEvent& ev) override
     {
         if (!fEditing) return false;
-        if (ev.mod & kModifierControl) return true;
+        if ((ev.mod & kModifierControl) || winCtrlDown()) return true;
         uint32_t cp = ev.character;
+        // Windows: ask the system which character this key gives in the user's current layout
+        if (!(ev.string[0] && (unsigned char)ev.string[0] >= 0x80)) cp = winTranslateTyped(cp);
         // hosts that forward keys (VST) give only the key code; the native window also gives UTF-8 text
         if (ev.string[0] && (unsigned char)ev.string[0] >= 0x80) { if (fEditBuf.size() < 900) fEditBuf += ev.string; repaint(); return true; }
         if (cp >= 32 && cp != 127 && fEditBuf.size() < 900)
         {
-            if (fRuLayout) cp = ruKey(cp);
+            if (fRuLayout && cp < 0x80) cp = ruKey(cp);
             appendUtf8(fEditBuf, cp);
         }
         repaint();
@@ -424,6 +462,7 @@ protected:
         setParam(pScene, (float)n);
         setParam(pDrumMode, (float)S.drumMode); setParam(pDrumPattern, (float)S.drumPattern);
         setParam(pDrumKit, (float)S.drumKit); setParam(pDrumVolume, S.drumVol);
+        for (int g = 0; g < kNumGenres; ++g) if (kGenres[g].kit == S.drumKit) { setParam(pDrumGenre, (float)g); break; }
         setParam(pReverb, S.reverb); setParam(pChorus, S.chorus); setParam(pLofi, S.lofi); setParam(pBrightness, S.bright);
         fEraTab = eraOf(S.part[0].inst);
     }
@@ -501,8 +540,8 @@ private:
     // ---- user drum patterns (same text format as the DSP: 9 lanes joined by '|', then ';len')
     void copyPreset(int u, int pi)
     {
-        pi = clampi(pi, 0, kNumPresetPatterns - 1);
-        const DrumPattern& P = kPatterns[pi];
+        if (isUserPattern(pi) || pi < 0 || pi >= kNumPatterns) pi = 0;
+        const DrumPattern& P = kPatterns[presetSlot(pi)];
         for (int l = 0; l < kDrumLanes; ++l)
         {
             std::memset(fUL[u][l], '-', 16); fUL[u][l][16] = 0;
@@ -529,15 +568,15 @@ private:
         n += std::snprintf(buf + n, sizeof(buf) - n, ";%d", fULen[u]);
         char key[8]; std::snprintf(key, sizeof(key), "pat%d", u + 1);
         setState(key, buf);
-        if ((int)std::lround(fParams[pDrumPattern]) != kNumPresetPatterns + u) setParam(pDrumPattern, (float)(kNumPresetPatterns + u));
+        if ((int)std::lround(fParams[pDrumPattern]) != kFirstUserPattern + u) setParam(pDrumPattern, (float)(kFirstUserPattern + u));
     }
     char patStep(int pat, int lane, int st) const
     {
-        if (pat < kNumPresetPatterns) { const DrumPattern& P = kPatterns[pat]; return st < P.len ? P.lane[lane][st] : '-'; }
-        const int u = pat - kNumPresetPatterns;
+        if (!isUserPattern(pat)) { const DrumPattern& P = kPatterns[presetSlot(pat)]; return st < P.len ? P.lane[lane][st] : '-'; }
+        const int u = pat - kFirstUserPattern;
         return st < fULen[u] ? fUL[u][lane][st] : '-';
     }
-    int patLen(int pat) const { return pat < kNumPresetPatterns ? kPatterns[pat].len : fULen[pat - kNumPresetPatterns]; }
+    int patLen(int pat) const { return !isUserPattern(pat) ? kPatterns[presetSlot(pat)].len : fULen[pat - kFirstUserPattern]; }
     static void noteName(int n, char* out, size_t sz)
     {
         static const char* const nm[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
@@ -609,15 +648,18 @@ private:
         addCtl(ctAction, pInstrument, aRandom, 728.f, 10.f, 104.f, 26.f, "RANDOM");
         // drums
         static const char* const modes[3] = { "OFF", "SYNC", "ALWAYS" };
-        static const char* const kits[5] = { "PC-98", "808", "8-BIT", "LIVE", "ROCK" };
         for (int i = 0; i < 3; ++i) addCtl(ctSelect, pDrumMode, (float)i, 100.f + i * 56.f, 552.f, 52.f, 24.f, modes[i]);
-        for (int i = 0; i < 5; ++i) addCtl(ctSelect, pDrumKit, (float)i, 272.f + i * 54.f, 552.f, 51.f, 24.f, kits[i]);
-        addCtl(ctToggle, pDrumFill, 0, 546.f, 552.f, 60.f, 24.f, "FILLS");
-        addCtl(ctEditOpen, pDrumPattern, 0, 610.f, 552.f, 66.f, 24.f, "EDIT \xE2\x9C\x8E");
+        addCtl(ctKitStep, pDrumKit, -1.f, 278.f, 552.f, 26.f, 24.f, "\xE2\x97\x80");
+        addCtl(ctKitStep, pDrumKit,  1.f, 420.f, 552.f, 26.f, 24.f, "\xE2\x96\xB6");
+        addCtl(ctToggle, pDrumFill, 0, 456.f, 552.f, 60.f, 24.f, "FILLS");
+        addCtl(ctEditOpen, pDrumPattern, 0, 522.f, 552.f, 62.f, 24.f, "EDIT \xE2\x9C\x8E");
+        for (int g = 0; g < kNumGenres; ++g)
+            addCtl(ctGenre, pDrumGenre, (float)g, 24.f + g * 62.f, 586.f, 59.f, 23.f, kGenres[g].name);
+        for (int k = 0; k < 6; ++k)
+            addCtl(ctGenrePat, pDrumPattern, (float)k, 24.f + k * 56.f, 614.f, 54.f, 23.f, nullptr);
+        for (int u = 0; u < kNumUserPatterns; ++u)
+            addCtl(ctSelect, pDrumPattern, (float)(kFirstUserPattern + u), 360.f + u * 56.f, 614.f, 54.f, 23.f, kUserPatternNames[u]);
         addCtl(ctKnob, pDrumVolume, 0, 868.f, 540.f, 72.f, 104.f, "DRUM VOL");
-        for (int i = 0; i < kNumPatterns; ++i)
-            addCtl(ctSelect, pDrumPattern, (float)i, 24.f + (i % 10) * 57.f, 586.f + (i / 10) * 28.f, 55.f, 23.f,
-                   i < kNumPresetPatterns ? kPatterns[i].name : kUserPatternNames[i - kNumPresetPatterns]);
         // drum editor overlay
         addCtl(ctEditClose, 0, 0, 786.f, 68.f, 26.f, 26.f, "\xE2\x9C\x95", gEditor);
         for (int u = 0; u < 4; ++u) addCtl(ctEditUser, 0, (float)u, 160.f + u * 78.f, 100.f, 72.f, 24.f, kUserPatternNames[u], gEditor);
@@ -694,8 +736,8 @@ private:
             {4, "Добавь LO-FI примерно на треть — так звучали звуковые чипы.", ctKnob, pLofi, -1, ckParamGE, pLofi, 0.25f},
             {4, "Немного CHORUS — для ширины звука.", ctKnob, pChorus, -1, ckChanged, pChorus, 0},
             {4, "Барабаны: включи SYNC — они будут играть вместе с DAW.", ctSelect, pDrumMode, 1, ckParamEq, pDrumMode, 1},
-            {4, "Ритм «Town Theme» — типичный для RPG 90-х.", ctSelect, pDrumPattern, 2, ckParamEq, pDrumPattern, 2},
-            {4, "Кит PC-98 — FM-барабаны той эпохи.", ctSelect, pDrumKit, 0, ckParamEq, pDrumKit, 0},
+            {4, "Стиль барабанов VN/RPG — FM-барабаны PC-98, как в играх той эпохи.", ctGenre, pDrumGenre, 0, ckParamEq, pDrumKit, 0},
+            {4, "Ритм «Town Theme» — типичный для RPG 90-х.", ctGenrePat, pDrumPattern, 1, ckParamEq, pDrumPattern, 2},
             {4, "На второй дорожке выбери «FM E.Piano» для аккордов, на третьей — «Synth Bass». Мелодию строй на нотах до-ре-ми-соль-ля — это пентатоника, звук сразу «японский».", -1, 0, 0, ckNext, 0, 0},
             {4, "Нажми Play в DAW! Все настройки сохранятся вместе с проектом. Вперёд, к приключениям!", -1, 0, 0, ckNext, 0, 0},
         };
@@ -2324,7 +2366,7 @@ private:
             strokeWidth(1.5f); strokeColor(Color(255, 255, 255, 0.9f)); stroke();
             label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, c.label, 13.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
         }
-        label(940, 30, "v6.0", 11.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
+        label(940, 30, "v7.0", 11.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
     }
 
     void pill(const Box& b, bool sel, bool hv, uint32_t accent, float r = 11.f)
@@ -2489,29 +2531,53 @@ private:
 
         const int mode = (int)std::lround(fParams[pDrumMode]);
         const int pat = clampi((int)std::lround(fParams[pDrumPattern]), 0, kNumPatterns - 1);
+        const int genre = clampi((int)std::lround(fParams[pDrumGenre]), 0, kNumGenres - 1);
+        const int kit = clampi((int)std::lround(fParams[pDrumKit]), 0, kNumKits - 1);
+        // kit name between the arrows
+        {
+            Box kb; kb.x = 306; kb.y = 552; kb.w = 112; kb.h = 24;
+            beginPath(); roundedRect(kb.x, kb.y, kb.w, kb.h, 11); fillColor(Color(255, 255, 255, 0.9f)); fill();
+            strokeWidth(1.f); strokeColor(hexc(C.accent, 0.6f)); stroke();
+            label(kb.x + kb.w / 2, kb.y + 9, "KIT", 7.5f, Color(150, 120, 160), ALIGN_CENTER | ALIGN_MIDDLE);
+            label(kb.x + kb.w / 2, kb.y + 17, kDrumKitNames[kit], 10.f, Color(70, 40, 90), ALIGN_CENTER | ALIGN_MIDDLE);
+        }
         for (int i = 0; i < fCtlCount; ++i)
         {
             const Control& c = fCtl[i];
-            if (c.group == gEditor) continue;
-            if (c.param != pDrumMode && c.param != pDrumKit && c.param != pDrumPattern && c.param != pDrumFill) continue;
-            if (c.type == ctKnob) continue;
-            bool sel;
-            if (c.type == ctToggle) sel = fParams[c.param] > 0.5f;
-            else if (c.type == ctEditOpen) sel = fEditor;
-            else sel = (int)std::lround(fParams[c.param]) == (int)c.value;
-            const bool isUser = c.param == pDrumPattern && c.type == ctSelect && c.value >= kNumPresetPatterns;
-            pill(c.b, sel, hover(c.b), isUser ? 0x8a5cff : C.accent);
+            if (c.group == gEditor || !visible(c)) continue;
+            const bool drumCtl = c.param == pDrumMode || c.param == pDrumKit || c.param == pDrumPattern || c.param == pDrumFill || c.param == pDrumGenre;
+            if (!drumCtl || c.type == ctKnob) continue;
+            bool sel = false;
+            const char* text = c.label;
             char buf[48];
-            if (c.type == ctToggle) std::snprintf(buf, sizeof(buf), "%s %s", sel ? "\xE2\x9C\x93" : "\xE2\x97\x8B", c.label);
-            else std::snprintf(buf, sizeof(buf), "%s", c.label);
-            label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, buf, c.param == pDrumPattern && c.type == ctSelect ? 8.5f : 10.f,
-                  sel ? Color(255, 255, 255) : (isUser ? Color(90, 50, 150) : Color(80, 50, 90)), ALIGN_CENTER | ALIGN_MIDDLE);
+            float fs = 10.f;
+            uint32_t acc = C.accent;
+            switch (c.type)
+            {
+            case ctToggle: sel = fParams[c.param] > 0.5f; std::snprintf(buf, sizeof(buf), "%s %s", sel ? "\xE2\x9C\x93" : "\xE2\x97\x8B", c.label); text = buf; break;
+            case ctEditOpen: sel = fEditor; break;
+            case ctKitStep: break;
+            case ctGenre: sel = (int)c.value == genre; fs = 8.5f; acc = 0xff8a3a; break;
+            case ctGenrePat:
+            {
+                const int pt = kGenres[genre].pats[(int)c.value];
+                sel = pt == pat; text = kPatterns[presetSlot(pt)].name; fs = 8.5f;
+                break;
+            }
+            default:
+                sel = (int)std::lround(fParams[c.param]) == (int)c.value;
+                if (c.param == pDrumPattern) { fs = 8.5f; acc = 0x8a5cff; }
+                break;
+            }
+            pill(c.b, sel, hover(c.b), acc);
+            label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, text, fs,
+                  sel ? Color(255, 255, 255) : (acc == 0x8a5cff ? Color(90, 50, 150) : (acc == 0xff8a3a ? Color(150, 70, 30) : Color(80, 50, 90))), ALIGN_CENTER | ALIGN_MIDDLE);
         }
 
         // step view: kick / snare+clap+rim / hats
         const int step = (int)std::lround(fParams[pOutDrumStep]);
         const int len = patLen(pat);
-        const float gx = 604, gy = 588, cw = 16.f, chh = 14.f;
+        const float gx = 606, gy = 588, cw = 16.f, chh = 14.f;
         static const char* const rows[3] = { "K", "S", "H" };
         for (int r = 0; r < 3; ++r)
         {
@@ -2535,7 +2601,7 @@ private:
             }
         }
         const char* hint = mode == 0 ? "Drums off: choose SYNC or ALWAYS" : (mode == 1 ? "Plays when the DAW is playing" : "Plays all the time");
-        label(684, 569, hint, 9.f, Color(120, 90, 130), ALIGN_LEFT | ALIGN_BASELINE);
+        label(592, 569, hint, 9.f, Color(120, 90, 130), ALIGN_LEFT | ALIGN_BASELINE);
 
         for (int i = 0; i < fCtlCount; ++i) if (fCtl[i].param == pDrumVolume && fCtl[i].type == ctKnob) drawKnob(fCtl[i], C.accent, true);
     }
@@ -2574,7 +2640,7 @@ private:
                 pill(c.b, sel, hv, 0x8a5cff);
                 const char* t = c.label;
                 if (c.type == ctEditLen) { std::snprintf(buf, sizeof(buf), "%d STEPS", fULen[u]); t = buf; }
-                if (c.type == ctEditCopy) { std::snprintf(buf, sizeof(buf), "COPY \xE2\x86\x90 %s", kPatterns[fLastPreset].name); t = buf; }
+                if (c.type == ctEditCopy) { std::snprintf(buf, sizeof(buf), "COPY \xE2\x86\x90 %s", kPatterns[presetSlot(isUserPattern(fLastPreset) ? 0 : fLastPreset)].name); t = buf; }
                 label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, t, 10.5f, sel ? Color(255, 255, 255) : Color(70, 40, 110), ALIGN_CENTER | ALIGN_MIDDLE);
                 break;
             }
@@ -2593,7 +2659,7 @@ private:
                 strokeWidth(hv && !off ? 2.f : 1.f); strokeColor(hv && !off ? hexc(0x8a5cff) : Color(180, 160, 210, 0.7f)); stroke();
                 if (chr == 'X' && !off) label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, "!", 12.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
                 if (chr == 'g' && !off) label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, "\xC2\xB7", 14.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
-                if (pat == kNumPresetPatterns + u && mode > 0 && st == step)
+                if (pat == kFirstUserPattern + u && mode > 0 && st == step)
                 { beginPath(); roundedRect(c.b.x - 1, c.b.y - 1, c.b.w + 2, c.b.h + 2, 6); strokeWidth(2.f); strokeColor(Color(90, 40, 110)); stroke(); }
                 break;
             }
@@ -2626,7 +2692,8 @@ private:
     bool fPixelUI = true, fPrevPixel = true;
     float fHeroU = 92.f, fHeroY = 214.f;
     bool fDrawingIdol = false, fEditing = false, fForceVocal = false;
-    bool fRuLayout = false, fScenesOpen = false, fStoryMenu = false;
+    bool fRuLayout = false, fScenesOpen = false, fStoryMenu = false, fAutoRu = false;
+    float fLastPasteT = -10;
     int fStory = -1, fStoryStep = 0, fStoryForce = -1; float fStoryStartVal = 0, fStoryT = 0, fStoryDoneT = -1;
     Box fStoryNext, fStoryExit;
     int fIdolShown = -1, fPrevIdol = 0; float fIdolSwitchT = -10;

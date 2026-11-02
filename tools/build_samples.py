@@ -15,14 +15,15 @@ os.makedirs(OUT, exist_ok=True)
 
 PC = {'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11}
 def midi(n):
-    m = re.match(r'([A-G])(#?)(-?\d)', n)
-    return 12 * (int(m.group(3)) + 1) + PC[m.group(1)] + (1 if m.group(2) else 0)
+    m = re.match(r'([A-Ga-g])(#|b?)(-?\d)', n)
+    acc = 1 if m.group(2) == '#' else (-1 if m.group(2) == 'b' else 0)
+    return 12 * (int(m.group(3)) + 1) + PC[m.group(1).upper()] + acc
 
 def ls(repo):
     r = subprocess.run(['git', '-C', os.path.join(SRC, repo), 'ls-tree', '-r', 'HEAD', '--name-only'], capture_output=True, text=True, check=True)
     return [l for l in r.stdout.split('\n') if l]
 
-LISTS = {r: ls(r) for r in ('vcsl', 'vsco')}
+LISTS = {r: ls(r) for r in sorted(set(sp['repo'] for sp in SPECS) | {'vcsl', 'vsco'})}
 
 # ---------------------------------------------------------------- choose files
 plan = []   # (key, repo, path, midi)
@@ -33,7 +34,9 @@ for s in SPECS:
         if not f.startswith(pre): continue
         m = re.search(s['rx'], f[len(pre):])
         if not m: continue
-        n = 30 + int(m.group(1)) * 5 if s.get('nonote') else midi(m.group(1))
+        if s.get('roots'): n = s['roots'][m.group(1)]
+        elif s.get('nonote'): n = 30 + int(m.group(1)) * 5
+        else: n = midi(m.group(1)) + s.get('offset', 0)
         if s['rng'][0] <= n <= s['rng'][1] and n not in cand: cand[n] = f
     last = -99
     for n in sorted(cand):
@@ -46,12 +49,13 @@ for lane, repo, rx in DRUMS:
     else: print('missing drum', lane)
 
 # ---------------------------------------------------------------- fetch blobs (sparse checkout)
-for repo in ('vcsl', 'vsco'):
+for repo in LISTS:
     paths = [p for _, r, p, _ in plan if r == repo] + [p for _, r, p in drumplan if r == repo]
     if not paths: continue
     pat = ['/' + p.replace('[', '\\[').replace(']', '\\]').replace('*', '\\*') for p in paths]
     d = os.path.join(SRC, repo)
-    subprocess.run(['git', '-C', d, 'sparse-checkout', 'set', '--no-cone', '--stdin'], input='\n'.join(pat), text=True, check=True)
+    from fetch_blobs import materialize
+    materialize(d, paths)
 
 def load(repo, path, rate):
     r = subprocess.run(['ffmpeg', '-v', 'error', '-i', os.path.join(SRC, repo, path), '-ac', '1', '-ar', str(rate), '-f', 'f32le', '-'], capture_output=True, check=True)
@@ -139,7 +143,7 @@ for s in SPECS:
     blob = bytearray()
     for path, n, repo in zones:
         x = trim_start(load(repo, path, s['rate']))
-        if s.get('detect'):
+        if s.get('detect') and not s.get('roots'):
             dm = detect_midi(x, s['rate'])
             print('   %s: named %d, detected %.2f' % (path.split('/')[-1], n, dm))
             if np.isfinite(dm) and 24 <= dm <= 100: n = int(round(dm))

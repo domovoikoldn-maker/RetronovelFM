@@ -34,6 +34,12 @@ SPECS = [
   dict(key="tbstac",   repo="vsco", folder="Brass/Tenor Trombone/stac", rx=r"_stac_([A-G]#?\d)_v3_rr1\.wav$", spacing=5, rate=24000, maxlen=0.8, loop=False, rng=(0, 127), detect=True),
   dict(key="vspic",    repo="vsco", folder="Strings/Violin Section/Spic", rx=r"_([A-G]#?\d)_v2_rr1\.wav$", spacing=4, rate=24000, maxlen=0.6, loop=False, rng=(55, 100)),
   dict(key="cspic",    repo="vsco", folder="Strings/Cello Section/spic", rx=r"^spic_([A-G]#?\d)_v2_RR1\.wav$", spacing=5, rate=24000, maxlen=0.7, loop=False, rng=(36, 62)),
+  # ---- real guitars / bass / drums for ROCK (CC0: Karoryfer Emily guitar, Black and Blue basses, Big Rusty Drums)
+  dict(key="egtr",     repo="karoryfer.emilyguitar", folder="notes", rx=r"^([a-g]b?\d)_mf_rr1\.wav$", spacing=0, rate=32000, maxlen=3.5, loop=True, rng=(0, 127), detect=True),
+  dict(key="egtrf",    repo="karoryfer.emilyguitar", folder="notes", rx=r"^([a-g]b?\d)_f_rr2\.wav$", spacing=0, rate=32000, maxlen=1.2, loop=False, rng=(0, 127), detect=True),
+  dict(key="ebass",    repo="karoryfer.black-and-blue-basses", folder="Samples/darkblack/reg", rx=r"^darkblack_([a-g]b?\d)_mf_rr1\.wav$", spacing=3, rate=24000, maxlen=3.0, loop=True, rng=(0, 127), offset=-12),
+  dict(key="etoms",    repo="karoryfer.big-rusty-drums", folder="Samples", rx=r"^tom_(22|18|15|14)/mallet/cl/t\d+_m_vl5_rr1\.flac$", spacing=0, rate=32000, maxlen=1.8, loop=False, rng=(0, 127), roots={"22": 36, "18": 41, "15": 46, "14": 50}),
+  dict(key="taiko",    repo="vcsl", folder="Membranophones/Struck Membranophones/Bass Drum 2", rx=r"^bassdrum_hit_(ff|mf1)\.wav$", spacing=0, rate=24000, maxlen=2.2, loop=False, rng=(0, 127), roots={"ff": 36, "mf1": 30}),
   dict(key="timp",     repo="vcsl", folder="Membranophones/Struck Membranophones/Timpani 2/Hit", rx=r"^Timpani([1-8])A_hit_v3_rr1_main\.wav$", spacing=0, rate=24000, maxlen=2.5, loop=False, rng=(0, 127), detect=True, nonote=True),
 ]
 # drum hits for the "Live (2000s)" kit: lane -> (repo, path regex)

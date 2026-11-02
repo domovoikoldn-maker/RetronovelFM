@@ -9,6 +9,15 @@ All embedded samples are released into the public domain under **CC0 1.0**:
 - **Versilian Studios Chamber Orchestra 2 Community Edition (VSCO-2-CE)** — https://github.com/sgossner/VSCO-2-CE
   (violin / viola / cello sections, flute, clarinet, oboe)
 
+- **Big Rusty Drums** by Karoryfer Samples — https://github.com/sfzinstruments/karoryfer.big-rusty-drums
+  (Rock and Brush Jazz kits, mallet toms)
+- **Virtuosity Drums** by Versilian Studios — https://github.com/sfzinstruments/virtuosity_drums
+  (Pop and Lo-Fi kits, cymbals of the Eurobeat kit)
+- **Emily Guitar** by Karoryfer Samples (D. Smolken) — https://github.com/sfzinstruments/karoryfer.emilyguitar
+  (all electric guitars, recorded direct and run through the plugin's amp simulation)
+- **Black and Blue Basses** by Karoryfer Samples — https://github.com/sfzinstruments/karoryfer.black-and-blue-basses
+  (bass guitar)
+
 Samples were trimmed, looped, resampled and mu-law encoded by `tools/build_samples.py`.
 Thank you to Versilian Studios for sharing these libraries.
 

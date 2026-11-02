@@ -17,6 +17,7 @@ jobs:
           git clone --recursive https://github.com/DISTRHO/DPF dpf
           git -C dpf checkout $DPF_COMMIT
           git -C dpf submodule update --init --recursive
+          sh tools/patch_dpf.sh dpf
       - name: Install MinGW
         run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64
       - name: Build Windows x64
@@ -45,6 +46,7 @@ jobs:
           git clone --recursive https://github.com/DISTRHO/DPF dpf
           git -C dpf checkout $DPF_COMMIT
           git -C dpf submodule update --init --recursive
+          sh tools/patch_dpf.sh dpf
       - name: Build macOS universal
         run: make MACOS_UNIVERSAL=true -j4
       - name: Zip
@@ -63,6 +65,7 @@ jobs:
           git clone --recursive https://github.com/DISTRHO/DPF dpf
           git -C dpf checkout $DPF_COMMIT
           git -C dpf submodule update --init --recursive
+          sh tools/patch_dpf.sh dpf
       - name: Install UI dependencies
         run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libdbus-1-dev pkg-config
       - name: Build Linux x64

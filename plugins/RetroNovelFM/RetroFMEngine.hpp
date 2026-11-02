@@ -57,7 +57,7 @@ public:
     Engine() {
         for (int i = 0; i < kParamCount; ++i) params[i] = kParams[i].def;
         // pattern table: 12 presets + 4 user patterns (start as copies of a few presets)
-        for (int i = 0; i < kNumPresetPatterns; ++i) pats[i] = kPatterns[i];
+        for (int i = 0; i < kNumPatterns; ++i) if (!isUserPattern(i)) pats[i] = kPatterns[presetSlot(i)];
         static const int seed[4] = { 0, 5, 7, 11 };
         for (int u = 0; u < 4; ++u) setUserPattern(u, patternToString(kPatterns[seed[u]]).c_str());
         seq.setTable(pats);
@@ -83,11 +83,11 @@ public:
             if (*c == '|') { ++lane; k = 0; continue; }
             if (k < 16) L[lane][k++] = (*c == 'X' || *c == 'x' || *c == 'g') ? *c : '-';
         }
-        DrumPattern& P = pats[kNumPresetPatterns + u];
-        P.name = kUserPatternNames[u]; P.len = len; P.swing = 0;
+        DrumPattern& P = pats[kFirstUserPattern + u];
+        P.name = kUserPatternNames[u]; P.len = len; P.swing = 0; P.triplet = 0;
         for (int l = 0; l < kDrumLanes; ++l) P.lane[l] = L[l];
     }
-    std::string getUserPattern(int u) const { return patternToString(pats[kNumPresetPatterns + u]); }
+    std::string getUserPattern(int u) const { return patternToString(pats[kFirstUserPattern + u]); }
 
     // ---- user samples (call from a non-audio thread)
     bool loadUserSample(int k, const char* path) {

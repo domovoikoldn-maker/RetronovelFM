@@ -23,7 +23,7 @@ protected:
     const char* getDescription() const override { return "FM synth + drum machine in the style of PC-98 / 90s visual novels and RPG Maker music"; }
     const char* getMaker() const override { return "RetroNovel"; }
     const char* getLicense() const override { return "ISC"; }
-    uint32_t getVersion() const override { return d_version(6, 0, 0); }
+    uint32_t getVersion() const override { return d_version(7, 0, 0); }
 
     static void setEnum(Parameter& p, const char* const* names, int count)
     {
@@ -54,12 +54,19 @@ protected:
         {
         case retrofm::pInstrument: setEnum(p, retrofm::kInstrumentNames, retrofm::kNumInstruments); break;
         case retrofm::pDrumMode:   setEnum(p, retrofm::kDrumModeNames, 3); break;
-        case retrofm::pDrumKit:    setEnum(p, retrofm::kDrumKitNames, 5); break;
+        case retrofm::pDrumKit:    setEnum(p, retrofm::kDrumKitNames, retrofm::kNumKits); break;
+        case retrofm::pDrumGenre:
+        {
+            const char* names[retrofm::kNumGenres];
+            for (int i = 0; i < retrofm::kNumGenres; ++i) names[i] = retrofm::kGenres[i].name;
+            setEnum(p, names, retrofm::kNumGenres);
+            break;
+        }
         case retrofm::pDrumPattern:
         {
             const char* names[retrofm::kNumPatterns];
-            for (int i = 0; i < retrofm::kNumPresetPatterns; ++i) names[i] = retrofm::kPatterns[i].name;
-            for (int i = 0; i < 4; ++i) names[retrofm::kNumPresetPatterns + i] = retrofm::kUserPatternNames[i];
+            for (int i = 0; i < retrofm::kNumPatterns; ++i)
+                names[i] = retrofm::isUserPattern(i) ? retrofm::kUserPatternNames[i - retrofm::kFirstUserPattern] : retrofm::kPatterns[retrofm::presetSlot(i)].name;
             setEnum(p, names, retrofm::kNumPatterns);
             break;
         }
