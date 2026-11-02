@@ -1,6 +1,10 @@
 // Retro Novel FM - VST2 / VST3 / CLAP / AU instrument built with DPF
 #include "DistrhoPlugin.hpp"
 #include "RetroFMEngine.hpp"
+#if defined(__SSE__) || defined(__x86_64__) || defined(_M_X64) || defined(_M_IX86)
+# include <xmmintrin.h>
+# define RETRO_FTZ 1
+#endif
 #include <memory>
 #include <cstdio>
 #include <cstring>
@@ -24,7 +28,7 @@ protected:
     const char* getDescription() const override { return "FM synth + drum machine in the style of PC-98 / 90s visual novels and RPG Maker music"; }
     const char* getMaker() const override { return "RetroNovel"; }
     const char* getLicense() const override { return "ISC"; }
-    uint32_t getVersion() const override { return d_version(8, 4, 0); }
+    uint32_t getVersion() const override { return d_version(8, 6, 0); }
 
     static void setEnum(Parameter& p, const char* const* names, int count)
     {
@@ -206,6 +210,12 @@ protected:
     void run(const float**, float** outputs, uint32_t frames,
              const MidiEvent* midiEvents, uint32_t midiEventCount) override
     {
+       #ifdef RETRO_FTZ
+        // flush denormals to zero: decaying reverb / filter tails otherwise make the CPU spike (crackles after stopping)
+        const unsigned int oldCsr = _mm_getcsr();
+        _mm_setcsr(oldCsr | 0x8040);
+       #endif
+        engine->beginBlock();
         // host transport -> drum sequencer
         const TimePosition& tp = getTimePosition();
         double bpm = 120.0, posSteps = 0.0;
@@ -237,6 +247,18 @@ protected:
             engine->midi(data, ev.size);
         }
         if (pos < frames) engine->process(outL + pos, outR + pos, frames - pos);
+        // Random Song notes -> MIDI out (record them on a MIDI track in the DAW)
+        for (int i = 0; i < engine->outCount(); ++i)
+        {
+            const retrofm::Engine::OutEvent& o = engine->outEvent(i);
+            MidiEvent me;
+            me.frame = o.frame < frames ? o.frame : frames - 1;
+            me.size = 3; me.data[0] = o.d[0]; me.data[1] = o.d[1]; me.data[2] = o.d[2]; me.data[3] = 0; me.dataExt = nullptr;
+            if (!writeMidiEvent(me)) break;
+        }
+       #ifdef RETRO_FTZ
+        _mm_setcsr(oldCsr);
+       #endif
     }
 
 public:

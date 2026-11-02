@@ -54,7 +54,7 @@ static const NeoPatch* neoPatches()
                 p->a = 0.001f; p->d = 0.7f; p->s = 0; p->r = 0.45f; p->level = 0.5f;
     // 4 Bell Pad
     p = &P[4];  p->osc = noFM; p->uni = 2; p->detune = 7; p->fmRatio = 3; p->fmIndex = 1.6f; p->fmDecay = 1.4f; p->fm2Ratio = 0.5f; p->fm2Index = 0.3f; p->fm2Decay = 4;
-                p->a = 0.25f; p->d = 2; p->s = 0.7f; p->r = 1.8f; p->level = 0.36f; p->lfoAmt = 0; p->vib = 4; p->vibDelay = 0.5f; p->vibRate = 4.5f;
+                p->a = 0.25f; p->d = 2; p->s = 0.7f; p->r = 0.9f; p->level = 0.36f; p->lfoAmt = 0; p->vib = 4; p->vibDelay = 0.5f; p->vibRate = 4.5f;
     // 5 City Pop EP: DX-style tine piano
     p = &P[5];  p->osc = noFM; p->uni = 2; p->detune = 5; p->fmRatio = 1; p->fmIndex = 2.0f; p->fmDecay = 0.9f; p->fm2Ratio = 14; p->fm2Index = 0.9f; p->fm2Decay = 0.035f;
                 p->a = 0.001f; p->d = 2.6f; p->s = 0.12f; p->r = 0.35f; p->level = 0.5f;
@@ -62,10 +62,10 @@ static const NeoPatch* neoPatches()
     p = &P[6];  *p = P[5]; p->cutoff = 2100; p->keyTrack = 0.2f; p->vib = 14; p->vibDelay = 0; p->vibRate = 0.55f; p->noise = 0.025f; p->crush = 0.15f; p->level = 0.6f; p->fmIndex = 1.5f;
     // 7 Vapor Pad
     p = &P[7];  p->osc = noSaw; p->uni = 5; p->detune = 18; p->osc2Semi = 12; p->osc2Lvl = 0.25f; p->cutoff = 1300; p->reso = 0.12f; p->lfoAmt = 0.35f; p->lfoRate = 0.18f;
-                p->a = 0.8f; p->d = 2; p->s = 1; p->r = 2.4f; p->vib = 9; p->vibDelay = 0; p->vibRate = 0.3f; p->level = 0.42f;
+                p->a = 0.8f; p->d = 2; p->s = 1; p->r = 1.0f; p->vib = 9; p->vibDelay = 0; p->vibRate = 0.3f; p->level = 0.42f;
     // 8 Shimmer Pad
     p = &P[8];  p->osc = noSaw; p->uni = 3; p->detune = 10; p->osc2Semi = 12; p->osc2Lvl = 0.55f; p->cutoff = 5200; p->lfoAmt = 0.4f; p->lfoRate = 0.22f;
-                p->a = 1.1f; p->d = 2; p->s = 1; p->r = 3.0f; p->level = 0.38f; p->filt = nfLP;
+                p->a = 1.1f; p->d = 2; p->s = 1; p->r = 1.2f; p->level = 0.38f; p->filt = nfLP;
     // 9 Synthwave Lead
     p = &P[9];  p->osc = noSaw; p->uni = 2; p->detune = 11; p->osc2Semi = -12; p->osc2Lvl = 0.4f; p->cutoff = 2800; p->reso = 0.3f; p->envAmt = 1.2f; p->fD = 0.35f; p->fS = 0.6f;
                 p->vib = 22; p->vibDelay = 0.3f; p->vibRate = 5.4f; p->glide = 0.05f; p->mono = 1; p->r = 0.25f; p->level = 0.4f;
@@ -118,7 +118,7 @@ public:
 
     NeoSynth() : bank(SampleBank::get()) { neoPatches(); ks.assign(NV * KS, 0.f); }
 
-    void setSampleRate(double sr) { srate = sr; for (auto& v : voices) v.active = false; nstack = 0; }
+    void setSampleRate(double sr) { srate = sr; for (auto& v : voices) v.active = false; for (int& n : nstack) n = 0; }
     void setRelease(float r) { relMul = r; }
     void setBrightness(float b) { bright = std::pow(2.0f, (b - 1.f) * 2.f); }
     void setVelSens(float s) { velSens = s; }
@@ -131,7 +131,7 @@ public:
         const double f = 440.0 * std::pow(2.0, (n - 69) / 12.0);
         if (P.mono) {
             // last-note priority with glide; legato keeps the envelope running
-            pushStack(note);
+            pushStack(pi, note);
             for (auto& v : voices)
                 if (v.active && v.mono && !v.released && v.patch == pi) {
                     v.note = note; v.target = f; v.vel = vel / 127.f;
@@ -140,7 +140,7 @@ public:
                 }
             Voice& v = alloc();
             start(v, pi, note, vel, f, gainMul);
-            if (lastMonoFreq > 0 && P.glide > 0 && lastMonoPatch == pi && nstack > 1) v.freq = lastMonoFreq;
+            if (lastMonoFreq > 0 && P.glide > 0 && lastMonoPatch == pi && nstack[pi] > 1) v.freq = lastMonoFreq;
             v.mono = true;
             return;
         }
@@ -151,12 +151,12 @@ public:
     void noteOff(int note, bool pedal, double transpose, int inst = -1) {
         const int onlyPatch = inst >= kFirstNeo ? inst - kFirstNeo : -1;
         if (inst >= 0 && onlyPatch < 0) return;
-        // mono voices: fall back to the previous held note
-        popStack(note);
+        // mono voices: fall back to the previous held note of the SAME synth (each synth has its own list)
+        for (int pi = 0; pi < kNumNeo; ++pi) if (onlyPatch < 0 || pi == onlyPatch) popStack(pi, note);
         for (auto& v : voices) {
             if (!v.active || v.released || v.note != note || (onlyPatch >= 0 && v.patch != onlyPatch)) continue;
-            if (v.mono && nstack > 0) {
-                const int nn = stack[nstack - 1];
+            if (v.mono && nstack[v.patch] > 0) {
+                const int nn = stack[v.patch][nstack[v.patch] - 1];
                 v.note = nn; v.target = 440.0 * std::pow(2.0, (nn + transpose - 69) / 12.0);
                 if (neoPatches()[v.patch].glide <= 0) v.freq = v.target;
                 continue;
@@ -165,7 +165,7 @@ public:
         }
     }
     void pedalUp() { for (auto& v : voices) if (v.active && v.held) release(v); }
-    void allOff() { nstack = 0; for (auto& v : voices) if (v.active) release(v); }
+    void allOff() { for (int& n : nstack) n = 0; for (auto& v : voices) if (v.active) release(v); }
 
     // clock: song position in 16ths (for synced LFO and pump); spp = sixteenths per sample
     float tick(double pmul, double clock, float& outL, float& outR) {
@@ -187,14 +187,19 @@ public:
             // pitch: glide, pitch envelope, delayed vibrato, bend
             if (P.glide > 0) v.freq += (v.target - v.freq) * glideCoef(P.glide);
             else v.freq = v.target;
-            double pm = pmul;
-            if (P.pitchEnv != 0) pm *= std::pow(2.0, P.pitchEnv * std::exp(-v.t / P.pitchDec) / 12.0);
-            if (P.vib > 0) {
-                v.vph += P.vibRate / srate; if (v.vph >= 1) v.vph -= 1;
-                const double ramp = std::min(1.0, std::max(0.0, (v.t - P.vibDelay) / 0.35));
-                pm *= std::pow(2.0, std::sin(6.2831853 * v.vph) * P.vib * ramp / 1200.0);
+            // pitch and filter move slowly: update them every 16 samples (saves most of the CPU)
+            const bool kr = (v.kr++ & 15) == 0;
+            if (P.vib > 0) { v.vph += P.vibRate / srate; if (v.vph >= 1) v.vph -= 1; }
+            if (kr) {
+                double pm = 1.0;
+                if (P.pitchEnv != 0) pm *= std::pow(2.0, P.pitchEnv * std::exp(-v.t / P.pitchDec) / 12.0);
+                if (P.vib > 0) {
+                    const double ramp = std::min(1.0, std::max(0.0, (v.t - P.vibDelay) / 0.35));
+                    pm *= std::pow(2.0, std::sin(6.2831853 * v.vph) * P.vib * ramp / 1200.0);
+                }
+                v.pmK = pm;
             }
-            const double f = v.freq * pm;
+            const double f = v.freq * v.pmK * pmul;
             if (P.mono) { lastMonoFreq = v.freq; lastMonoPatch = v.patch; }
 
             // oscillators
@@ -208,14 +213,16 @@ public:
                 else { v.lph += P.lfoRate / srate; if (v.lph >= 1) v.lph -= 1; lfo = std::sin(6.2831853 * v.lph); }
             }
             if (P.cutoff < 17500 || P.filt != nfLP || P.envAmt > 0 || P.lfoAmt > 0) {
-                const double velAmt = 0.5 + 0.5 * v.vel;
-                double fc = P.cutoff * std::pow(2.0, P.envAmt * v.fenv * velAmt + P.lfoAmt * lfo * 0.5 + P.keyTrack * (v.note - 60) / 12.0) * bright;
-                fc = std::max(25.0, std::min(fc, srate * 0.45));
-                const double g = std::tan(3.14159265 * fc / srate);
-                const double k = 2.0 - 1.96 * P.reso;
-                const double a1 = 1.0 / (1.0 + g * (g + k)), a2 = g * a1, a3 = g * a2;
-                l = svf(v.fs[0], v.fs[1], l, a1, a2, a3, k, P.filt);
-                r = svf(v.fs[2], v.fs[3], r, a1, a2, a3, k, P.filt);
+                if (kr) {
+                    const double velAmt = 0.5 + 0.5 * v.vel;
+                    double fc = P.cutoff * std::pow(2.0, P.envAmt * v.fenv * velAmt + P.lfoAmt * lfo * 0.5 + P.keyTrack * (v.note - 60) / 12.0) * bright;
+                    fc = std::max(25.0, std::min(fc, srate * 0.45));
+                    const double g = std::tan(3.14159265 * fc / srate);
+                    v.fk = 2.0 - 1.96 * P.reso;
+                    v.fa1 = 1.0 / (1.0 + g * (g + v.fk)); v.fa2 = g * v.fa1; v.fa3 = g * v.fa2;
+                }
+                l = svf(v.fs[0], v.fs[1], l, v.fa1, v.fa2, v.fa3, v.fk, P.filt);
+                r = svf(v.fs[2], v.fs[3], r, v.fa1, v.fa2, v.fa3, v.fk, P.filt);
             }
             if (P.drive > 0) { const float dg = 1.f + P.drive; const float nrm = 1.f / std::tanh(dg * 0.6f); l = std::tanh(l * dg * 0.6f) * nrm * 0.8f; r = std::tanh(r * dg * 0.6f) * nrm * 0.8f; }
             if (P.crush > 0) {
@@ -239,6 +246,8 @@ private:
         double freq = 440, target = 440, t = 0, vph = 0, lph = 0;
         double ph[8] = {0}, ph2[8] = {0}, subPh = 0, fmPh = 0, fm2Ph = 0, cbPh[2] = {0, 0};
         float pan[8] = {0};
+        double det[8] = {1, 1, 1, 1, 1, 1, 1, 1};   // unison detune ratios (computed once per note)
+        double pmK = 1, fa1 = 1, fa2 = 0, fa3 = 0, fk = 2; uint32_t kr = 0;
         float env = 0, fenv = 0, vel = 1, amp = 1, chL = 0, chR = 0;
         double atk = 1, dec = 1, rel = 1, fatk = 1, fdec = 1;
         float fs[4] = {0, 0, 0, 0}, fm[4][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
@@ -272,7 +281,7 @@ private:
         case noSquare: {
             const int n = P.uni;
             for (int k = 0; k < n; ++k) {
-                const double det = n == 1 ? 1.0 : std::pow(2.0, ((k - (n - 1) * 0.5) / ((n - 1) * 0.5)) * P.detune / 1200.0);
+                const double det = v.det[k];
                 const double d = dt * det;
                 v.ph[k] += d; if (v.ph[k] >= 1) v.ph[k] -= 1;
                 double o;
@@ -301,7 +310,7 @@ private:
             const double mi = P.fmIndex * std::exp(-v.t / P.fmDecay) * (0.5 + 0.5 * v.vel);
             const double mi2 = P.fm2Index * std::exp(-v.t / P.fm2Decay) * v.vel;
             for (int k = 0; k < n; ++k) {
-                const double det = n == 1 ? 1.0 : std::pow(2.0, (k ? 1 : -1) * P.detune / 1200.0);
+                const double det = n == 1 ? 1.0 : v.det[k ? 7 : 0];
                 v.ph[k] += dt * det; if (v.ph[k] >= 1) v.ph[k] -= 1;
                 v.ph2[k] += dt * det * P.fmRatio; if (v.ph2[k] >= 1) v.ph2[k] -= 1;
                 v.ph2[k + 4] += dt * det * P.fm2Ratio; if (v.ph2[k + 4] >= 1) v.ph2[k + 4] -= 1;
@@ -407,6 +416,9 @@ private:
         }
         if (P.osc == noFM || P.osc == noSine) { for (int k = 0; k < 8; ++k) { v.ph[k] = 0; v.ph2[k] = 0; } }
         v.subPh = 0; v.cbPh[0] = v.cbPh[1] = 0;
+        v.kr = 0; v.pmK = 1;
+        for (int k = 0; k < 8; ++k) v.det[k] = P.uni <= 1 ? 1.0 : std::pow(2.0, ((k - (P.uni - 1) * 0.5) / ((P.uni - 1) * 0.5)) * P.detune / 1200.0);
+        if (P.osc == noFM) { v.det[0] = std::pow(2.0, -P.detune / 1200.0); v.det[7] = std::pow(2.0, P.detune / 1200.0); }   // FM: two copies
         v.vowel = (vowelCounter++) % 5;
         v.z = nullptr;
         if (P.osc == noSample && P.sample) {
@@ -435,8 +447,8 @@ private:
         }
     }
     void release(Voice& v) { v.released = true; v.held = false; v.stage = 3; }
-    void pushStack(int n) { popStack(n); if (nstack < 16) stack[nstack++] = n; }
-    void popStack(int n) { int j = 0; for (int i = 0; i < nstack; ++i) if (stack[i] != n) stack[j++] = stack[i]; nstack = j; }
+    void pushStack(int pi, int n) { popStack(pi, n); if (nstack[pi] < 16) stack[pi][nstack[pi]++] = n; }
+    void popStack(int pi, int n) { int j = 0; for (int i = 0; i < nstack[pi]; ++i) if (stack[pi][i] != n) stack[pi][j++] = stack[pi][i]; nstack[pi] = j; }
 
     const SampleBank& bank;
     Voice voices[NV];
@@ -444,7 +456,7 @@ private:
     double srate = 44100, lastMonoFreq = 0;
     int lastMonoPatch = -1;
     float relMul = 1, bright = 1, velSens = 1;
-    int stack[16]; int nstack = 0, vowelCounter = 0;
+    int stack[kNumNeo][16]; int nstack[kNumNeo] = {0}; int vowelCounter = 0;
     uint32_t serial = 0, rng = 0x13579bdfu;
 };
 

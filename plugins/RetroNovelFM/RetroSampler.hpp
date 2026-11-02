@@ -192,7 +192,7 @@ static const XPInst kXP2[kNumXP2] = {
     // src        layers  a      d     s     r      cut    vc    det  vib  rev  crush rnd oct  level  drive chord mute sust rhythm arp revLen
     {srcMBox,    NOL,    0.0f,  9,   1.0f, 0.60f,  9000, 0.3f,  0,   0, false, 0, 28, 0, 0.62f, 0.0f, 0, 0.0f, 0.0f, 0, 0, 0},     // Cursed Box
     {srcSample, L1("cymrev"), 0.0f, 9, 1.0f, 0.15f, 20000, 0.2f, 0,  0, true,  0, 0, 0, 2.20f, 0.0f, 0, 0.0f, 0.0f, 0, 0, 3.0f},  // Reverse Cymbal
-    {srcSaw,     NOL,    1.2f,  9,   1.0f, 2.20f,  2200, 0.0f, 38,  18, false, 0, 22, 0, 0.70f, 0.0f, 0, 0.0f, 0.0f, 0, 0, 0},    // Detuned Pad
+    {srcSaw,     NOL,    1.2f,  9,   1.0f, 0.90f,  2200, 0.0f, 38,  18, false, 0, 22, 0, 0.70f, 0.0f, 0, 0.0f, 0.0f, 0, 0, 0},    // Detuned Pad
     {srcSample, L1("tbell"), 0.0f, 9,  1.0f, 2.50f, 20000, 0.3f, 0,  0, false, 0, 0, 0, 1.10f, 0.0f, 0, 0.0f, 0.0f, 0, 0, 0},    // School Chime
     {srcEBell,   NOL,    0.0f,  9,   1.0f, 0.35f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.55f, 0.0f, 0, 0.0f, 0.0f, 0, 0, 0},     // School Bell (electric ringer)
     {srcSample, L1("piano"), 0.002f, 9, 1.0f, 0.45f, 5200, 0.4f, 14, 0, false, 0, 22, 0, 1.15f, 0.0f, 0, 0.0f, 0.0f, 0, 0, 0},   // Class Piano (out of tune)

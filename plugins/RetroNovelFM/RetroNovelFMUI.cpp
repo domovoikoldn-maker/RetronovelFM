@@ -15,6 +15,8 @@
 
 namespace retrofm {
 uint32_t winTranslateTyped(uint32_t hostChar);
+bool retroRenderSongWav(const char* path, const float* params, const char* song, const char* lyrics,
+                        const std::string* pats, const std::string* smp, const int* roots, int bpm, int loops, std::string& info);
 bool winCtrlDown();
 bool winKeyVDown();
 bool winLayoutIsCyrillic();
@@ -48,7 +50,7 @@ enum CtlType { ctSelect, ctKnob, ctToggle, ctAction, ctEraTab, ctLoad, ctClearSm
                ctGenre, ctGenrePat, ctKitStep,
                ctToolsOpen, ctToolsClose, ctHarmonyOpen, ctHarmonyClose, ctMeterOpen, ctMeterPick, ctSongGen, ctSongToggle,
                ctVoiceType, ctXPPage, ctSavePreset, ctLoadPreset, ctExportPack, ctImportPack, ctMidiTake, ctMidiSong, ctClearTake,
-               ctSlot, ctSlotStore, ctHarmKey, ctHarmScale, ctHarmChord, ctHarmLock };
+               ctSlot, ctSlotStore, ctHarmKey, ctHarmScale, ctHarmChord, ctHarmLock, ctWavSong };
 // control groups: 0 = always, 1..3 = only on that era tab (FM / XP / user), 10 = drum editor overlay
 enum CtlGroup { gAlways = 0, gFM = 1, gXP = 2, gUser = 3, gEditor = 10, gVocal = 11, gInst = 12, gRock = 13, gScenes = 14, gStoryMenu = 15,
                 gReiwa = 16, gHarmony = 17, gTools = 18, gMeter = 19, gXP2 = 20, gXPTabs = 21 };
@@ -361,6 +363,9 @@ protected:
             case ctMidiSong:
                 if (fSongText.empty()) { status("Сначала нажми RANDOM SONG"); break; }
                 openFile(faMidiSong, true, "random_song.mid", "Export MIDI (.mid)"); break;
+            case ctWavSong:
+                if (fSongText.empty()) { status("Сначала нажми RANDOM SONG"); break; }
+                openFile(faWavSong, true, "random_song.wav", "Export WAV (.wav)"); break;
             case ctClearTake: retroTakeClear(getPluginInstancePointer()); setState("take", ""); status("Запись очищена"); break;
             case ctSlot:
             {
@@ -821,6 +826,7 @@ private:
         }
         addCtl(ctExportPack, 0, 0, 104.f, 314.f, 180.f, 30.f, "EXPORT PACK", gTools);
         addCtl(ctImportPack, 0, 0, 292.f, 314.f, 180.f, 30.f, "IMPORT PACK", gTools);
+        addCtl(ctWavSong, 0, 0, 500.f, 314.f, 250.f, 30.f, "EXPORT WAV: RANDOM SONG", gTools);
         addCtl(ctMidiTake, 0, 0, 104.f, 396.f, 250.f, 30.f, "EXPORT MIDI: MY TAKE", gTools);
         addCtl(ctMidiSong, 0, 0, 362.f, 396.f, 250.f, 30.f, "EXPORT MIDI: RANDOM SONG", gTools);
         addCtl(ctClearTake, 0, 0, 620.f, 396.f, 130.f, 30.f, "CLEAR TAKE", gTools);
@@ -1002,6 +1008,18 @@ private:
             T[0].notes = notes;
             const std::string path = withExt(filename, ".mid");
             status(writeMidiFile(path.c_str(), T, bpm, num, den) ? "MIDI сохранён: " + std::to_string(notes.size()) + " нот" + (vocal ? " (с текстом)" : "") : "Не удалось записать файл");
+            break;
+        }
+        case faWavSong:
+        {
+            std::string pats[4], info;
+            for (int u = 0; u < 4; ++u) pats[u] = userPatString(u);
+            const std::string path = withExt(filename, ".wav");
+            float pr[kParamCount];
+            for (int i = 0; i < kParamCount; ++i) pr[i] = fParams[i];
+            if (retroRenderSongWav(path.c_str(), pr, fSongText.c_str(), fLyrics.c_str(), pats, fSmpPath, fRoot, fSongBpm, 2, info))
+                status("WAV сохранён: " + std::string(baseName(path.c_str())) + " (" + info + ")");
+            else status("Не удалось сохранить WAV");
             break;
         }
         case faMidiSong:
@@ -1474,6 +1492,7 @@ private:
             }
             case ctMidiSong: chip(c, false, 0xff8a3a, fSongText.empty() ? "\xE2\x99\xAB MIDI: RANDOM SONG (нет песни)" : "\xE2\x99\xAB EXPORT MIDI: RANDOM SONG", 10.5f); break;
             case ctClearTake: chip(c, false, 0x9a8aa8, "CLEAR TAKE", 10.5f); break;
+            case ctWavSong: chip(c, false, 0x3fae6a, fSongText.empty() ? "\xE2\x99\xAB WAV: RANDOM SONG (нет песни)" : "\xE2\x99\xAB EXPORT WAV: RANDOM SONG", 10.5f); break;
             case ctSlotStore: break;   // drawn with the slot card
             case ctSlot:
             {
@@ -1507,7 +1526,7 @@ private:
             "\xE2\x80\xA2 .rnfm \xE2\x80\x94 обычный текст JSON: его можно открыть блокнотом, отправить другу, править вручную;",
             "   новые ручки будущих версий не ломают старые пресеты. Пак = несколько пресетов в одном файле (для обмена и продажи).",
             "\xE2\x80\xA2 МОЯ ИГРА \xE2\x80\x94 ноты, которые ты играл (с последнего старта Play в DAW). В режиме VOCAL в MIDI попадает и текст.",
-            "\xE2\x80\xA2 RANDOM SONG \xE2\x80\x94 три дорожки: мелодия, аккорды, бас. Перетащи .mid в DAW и дорабатывай!",
+            "\xE2\x80\xA2 RANDOM SONG \xE2\x80\x94 MIDI (3 дорожки) или готовый WAV. Ещё плагин шлёт ноты песни на свой MIDI-выход \xE2\x80\x94 их можно записать в DAW.",
         };
         for (int k = 0; k < 4; ++k) label(104, 450 + k * 13.f, info[k], 9.5f, Color(100, 80, 130), ALIGN_LEFT | ALIGN_BASELINE);
     }
@@ -3188,7 +3207,7 @@ private:
             fill(); strokeWidth(1.5f); strokeColor(on || c.type == ctSongGen ? Color(255, 255, 255) : hexc(C.accent, 0.8f)); stroke();
             label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, t, c.type == ctHarmonyOpen ? 10.5f : 11.5f, on || c.type == ctSongGen ? Color(255, 255, 255) : hexc(C.accent), ALIGN_CENTER | ALIGN_MIDDLE);
         }
-        label(944, 28, "v8.4", 10.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
+        label(944, 28, "v8.6", 10.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
     }
 
     // small round arrows in a panel header (instrument / idol browsing)
@@ -3611,7 +3630,7 @@ private:
     float fStatusT = -100;
     std::vector<PresetData> fSlots = std::vector<PresetData>(8);
     uint32_t fLessonMask = 0;
-    enum FileAction { faNone, faSavePreset, faLoadPreset, faExportPack, faImportPack, faMidiTake, faMidiSong };
+    enum FileAction { faNone, faSavePreset, faLoadPreset, faExportPack, faImportPack, faMidiTake, faMidiSong, faWavSong };
     int fFileAction = faNone;
     uint32_t fSongSeed = 1;
     int fSongBpm = 120;

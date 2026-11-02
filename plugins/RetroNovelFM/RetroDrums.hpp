@@ -10,13 +10,14 @@ namespace retrofm {
 
 class DrumSynth {
 public:
-    void setSampleRate(double sr) { srate = sr; for (auto& v : v_) v.active = false; }
+    void setSampleRate(double sr) { srate = sr; for (auto& v : v_) v.active = false; tailK = std::exp(-1.0 / (0.003 * sr)); for (int l = 0; l < kDrumLanes; ++l) tail[l] = last[l] = 0; }
     void setKit(int k) { kit = k < 0 ? 0 : (k > kNumKits - 1 ? kNumKits - 1 : k); }
 
     void trigger(int lane, float vel) {
         if (lane < 0 || lane >= kDrumLanes || vel <= 0) return;
-        if (lane == dCHat) v_[dOHat].active = false;   // closed hat chokes open hat
+        if (lane == dCHat && v_[dOHat].active) { tail[dOHat] += last[dOHat]; v_[dOHat].active = false; }   // closed hat chokes open hat (softly)
         Voice& v = v_[lane];
+        if (v.active) tail[lane] += last[lane];
         v.active = true; v.t = 0; v.vel = vel; v.ph = 0; v.ph2 = 0;
         v.lp = v.bp = 0; v.hpz = 0; v.spos = 0; v.zd = nullptr; v.zl = 0; v.zg = 1.f;
         // real kits (and the Eurobeat kit's cymbals / snare layer) play recorded hits
@@ -39,31 +40,58 @@ public:
         double out = 0;
         const double dt = 1.0 / srate;
         for (int lane = 0; lane < kDrumLanes; ++lane) {
+            // a new hit takes over the lane: the previous hit fades out in ~3 ms instead of being cut (no clicks)
+            if (tail[lane] != 0.0) { out += tail[lane]; tail[lane] *= tailK; if (std::fabs(tail[lane]) < 1e-6) tail[lane] = 0.0; }
             Voice& v = v_[lane];
-            if (!v.active) continue;
+            if (!v.active) { last[lane] = 0; continue; }
+            const double before = out;
+            laneTick(lane, out, dt);
+            last[lane] = out - before;
+        }
+        // 8-bit kit: crush
+        static const double kitMaster[kNumKits] = { 1.0, 0.65, 0.6, 1.15, 1.75, 1.45, 2.1, 0.62, 2.0 };
+        out *= kitMaster[kit];
+        if (kit == 4) out = std::tanh(out * 1.35) * 0.9;    // rock: glue
+        if (kit == 7) out = std::tanh(out * 1.25) * 0.92;   // eurobeat: punchy bus
+        if (kit == 8) {                                     // lo-fi: dull and slightly crushed
+            lofiLp += (out - lofiLp) * 0.28; out = lofiLp;
+            if (++hc >= 2) { hc = 0; held = std::floor(out * 96 + 0.5) / 96; }
+            out = held;
+        }
+        if (kit == 2) {
+            if (++hc >= 3) { hc = 0; held = std::floor(out * 24 + 0.5) / 24; }
+            out = held;
+        }
+        pulse *= 0.9997f;
+        return (float)out;
+    }
+
+private:
+    void laneTick(int lane, double& out, const double dt) {
+        Voice& v = v_[lane];
             const double t = v.t;
             double s = 0, amp = 1;
             if (v.zd) {      // recorded hit (real kits)
                 const uint32_t i = (uint32_t)v.spos;
-                if (i + 1 >= v.zl) { v.zd = nullptr; if (!(kit == 7 && lane == dSnare)) { v.active = false; continue; } }
+                if (i + 1 >= v.zl) { v.zd = nullptr; if (!(kit == 7 && lane == dSnare)) { v.active = false; return; } }
                 else {
                     const float f = (float)(v.spos - i);
                     const double smp = (v.zd[i] * (1 - f) + v.zd[i + 1] * f) * v.zg * kitGain(kit, lane);
                     v.spos += 32000.0 / srate;
-                    if (!(kit == 7 && lane == dSnare)) { out += smp; v.t += dt; continue; }
+                    if (!(kit == 7 && lane == dSnare)) { out += smp; v.t += dt; return; }
                     out += smp;   // Eurobeat snare: recorded snare + synthetic body below
                 }
             }
             if (kit == 3) {   // orchestral kit: CC0 recordings
                 const Zone& z = SampleBank::get().drum(lane);
                 const uint32_t i = (uint32_t)v.spos;
-                if (!z.data || i + 1 >= z.len) { v.active = false; continue; }
+                if (!z.data || i + 1 >= z.len) { v.active = false; return; }
                 const float f = (float)(v.spos - i);
                 s = (z.data[i] * (1 - f) + z.data[i + 1] * f) * liveGain(lane);
                 v.spos += z.rate / srate;
                 out += s * v.vel;
                 v.t += dt;
-                continue;
+                return;
             }
             switch (lane) {
             case dKick: {
@@ -126,24 +154,8 @@ public:
             }
             out += s * amp * v.vel * laneGain(lane);
             v.t += dt;
-        }
-        // 8-bit kit: crush
-        static const double kitMaster[kNumKits] = { 1.0, 0.65, 0.6, 1.15, 1.75, 1.45, 2.1, 0.62, 2.0 };
-        out *= kitMaster[kit];
-        if (kit == 4) out = std::tanh(out * 1.35) * 0.9;    // rock: glue
-        if (kit == 7) out = std::tanh(out * 1.25) * 0.92;   // eurobeat: punchy bus
-        if (kit == 8) {                                     // lo-fi: dull and slightly crushed
-            lofiLp += (out - lofiLp) * 0.28; out = lofiLp;
-            if (++hc >= 2) { hc = 0; held = std::floor(out * 96 + 0.5) / 96; }
-            out = held;
-        }
-        if (kit == 2) {
-            if (++hc >= 3) { hc = 0; held = std::floor(out * 24 + 0.5) / 24; }
-            out = held;
-        }
-        pulse *= 0.9997f;
-        return (float)out;
-    }
+            }
+public:
 
     float pulse = 0;
 
@@ -163,6 +175,7 @@ private:
     }
     double lofiLp = 0;
     int rrCount[kDrumLanes] = {0,0,0,0,0,0,0,0,0};
+    double tail[kDrumLanes] = {0}, last[kDrumLanes] = {0}, tailK = 0.99;
     struct Voice { const float* zd = nullptr; uint32_t zl = 0; float zg = 1.f; double spos = 0; bool active = false; double t = 0, ph = 0, ph2 = 0, lp = 0, bp = 0, hpz = 0, mph[6] = {0,0,0,0,0,0}; float vel = 0; };
 
     static double laneGain(int lane) {

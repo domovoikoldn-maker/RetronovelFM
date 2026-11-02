@@ -401,7 +401,14 @@ public:
         for (uint32_t s = 0; s < n; ++s) { float l, r; tick(l, r); outL[s] = l; outR[s] = r; }
     }
 
+    // ---- MIDI out: the Random Song's notes, so the DAW can record them (ch 1 melody, 2 chords, 3 bass)
+    struct OutEvent { uint32_t frame; uint8_t d[3]; };
+    void beginBlock() { frameInBlock = 0; nOut = 0; }
+    int outCount() const { return nOut; }
+    const OutEvent& outEvent(int i) const { return outQ[i]; }
+
     void tick(float& outL, float& outR) {
+        ++frameInBlock;
         clock += rStepsPerSample;
         songTick();
         vph += vrateInc; if (vph >= 1) vph -= 1;
@@ -521,12 +528,19 @@ private:
                 if (e.t != k) continue;
                 if (nSongOn >= 64) break;
                 const int owner = startNote(e.note, e.vel, e.track);
-                songOn[nSongOn].note = e.note; songOn[nSongOn].track = owner; songOn[nSongOn].left = e.dur; ++nSongOn;
+                songOn[nSongOn].note = e.note; songOn[nSongOn].track = owner; songOn[nSongOn].left = e.dur;
+                songOn[nSongOn].ch = std::max(0, std::min(2, e.track)); ++nSongOn;
+                midiOut(0x90 | std::max(0, std::min(2, e.track)), e.note, e.vel);
             }
         }
     }
-    struct SongOn { int note, track, left; };
-    void songOff(const SongOn& o) { stopNote(o.note, false, o.track); }   // track holds the owner instrument
+    struct SongOn { int note, track, left, ch; };
+    void songOff(const SongOn& o) { stopNote(o.note, false, o.track); midiOut(0x80 | o.ch, o.note, 0); }   // track holds the owner instrument
+    void midiOut(int st, int d1, int d2) {
+        if (nOut >= 512) return;
+        OutEvent& e = outQ[nOut++];
+        e.frame = frameInBlock > 0 ? frameInBlock - 1 : 0; e.d[0] = (uint8_t)st; e.d[1] = (uint8_t)d1; e.d[2] = (uint8_t)d2;
+    }
 
     double env(Voice& v, int k) {
         const Patch& P = kPatches[v.patch];
@@ -685,11 +699,13 @@ private:
     SongData songBuf[2]; std::atomic<int> songIdx { 0 }; bool songResync = true;
     SongOn songOn[64]; int nSongOn = 0; int64_t lastSongStep = INT64_MIN;
     double clock = 0, lastBpm = 120;
+    OutEvent outQ[512]; int nOut = 0; uint32_t frameInBlock = 0;
     double dcR = 0.999, dcxL = 0, dcxR = 0, dcpL = 0, dcpR = 0, limG = 1, limAtk = 0.9, limRel = 0.9999;
     Recorder rec;
 public:
     int songRestarts = 0;   // diagnostics: how often sounding song notes were cut by a resync
     long drumSteps() const { return seq.fired; }
+    double limiterGain() const { return limG; }
 private:
     Voice voices[NV];
     float chb[CHN]; int cw = 0;
