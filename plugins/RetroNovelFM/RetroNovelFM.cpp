@@ -10,6 +10,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <string>
+#include <chrono>
 
 START_NAMESPACE_DISTRHO
 
@@ -28,7 +29,7 @@ protected:
     const char* getDescription() const override { return "FM synth + drum machine in the style of PC-98 / 90s visual novels and RPG Maker music"; }
     const char* getMaker() const override { return "RetroNovel"; }
     const char* getLicense() const override { return "ISC"; }
-    uint32_t getVersion() const override { return d_version(8, 6, 0); }
+    uint32_t getVersion() const override { return d_version(8, 7, 0); }
 
     static void setEnum(Parameter& p, const char* const* names, int count)
     {
@@ -83,6 +84,7 @@ protected:
             break;
         }
         case retrofm::pKey:   setEnum(p, retrofm::kKeyNames, 12); break;
+        case retrofm::pQuality: setEnum(p, retrofm::kQualityNames, 3); break;
         case retrofm::pChord: setEnum(p, retrofm::kChordModeNames, retrofm::kNumChordModes); break;
         case retrofm::pScale:
         {
@@ -125,6 +127,7 @@ protected:
         case retrofm::pOutMouth:    return engine->outMouth();
         case retrofm::pOutVowel:    return engine->outVowel();
         case retrofm::pOutSyll:     return engine->outSyll();
+        case retrofm::pOutCpu:      return cpuLoad;
         default:                    return engine->getParam((int)index);
         }
     }
@@ -216,6 +219,7 @@ protected:
         _mm_setcsr(oldCsr | 0x8040);
        #endif
         engine->beginBlock();
+        const auto tStart = std::chrono::steady_clock::now();
         // host transport -> drum sequencer
         const TimePosition& tp = getTimePosition();
         double bpm = 120.0, posSteps = 0.0;
@@ -247,6 +251,13 @@ protected:
             engine->midi(data, ev.size);
         }
         if (pos < frames) engine->process(outL + pos, outR + pos, frames - pos);
+        // how much of the real-time budget this block used (for the CPU meter and AUTO mode)
+        if (frames > 0 && getSampleRate() > 0)
+        {
+            const double used = std::chrono::duration<double>(std::chrono::steady_clock::now() - tStart).count() / (frames / getSampleRate());
+            cpuLoad = cpuLoad * 0.97f + (float)used * 0.03f;
+            engine->setCpuLoad(cpuLoad);
+        }
         // Random Song notes -> MIDI out (record them on a MIDI track in the DAW)
         for (int i = 0; i < engine->outCount(); ++i)
         {
@@ -265,6 +276,7 @@ public:
     std::unique_ptr<retrofm::Engine> engine;
 private:
     std::string slots, lessons;
+    float cpuLoad = 0.f;
 
     DISTRHO_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RetroNovelFM)
 };

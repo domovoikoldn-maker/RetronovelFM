@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include "RetroData.hpp"
+#include "RetroFast.hpp"
 #include "RetroSampler.hpp"
 
 namespace retrofm {
@@ -11,6 +12,7 @@ namespace retrofm {
 class DrumSynth {
 public:
     void setSampleRate(double sr) { srate = sr; for (auto& v : v_) v.active = false; tailK = std::exp(-1.0 / (0.003 * sr)); for (int l = 0; l < kDrumLanes; ++l) tail[l] = last[l] = 0; }
+    void panic() { for (auto& v : v_) v.active = false; for (int l = 0; l < kDrumLanes; ++l) tail[l] = last[l] = 0; lofiLp = 0; held = 0; }
     void setKit(int k) { kit = k < 0 ? 0 : (k > kNumKits - 1 ? kNumKits - 1 : k); }
 
     void trigger(int lane, float vel) {
@@ -51,8 +53,8 @@ public:
         // 8-bit kit: crush
         static const double kitMaster[kNumKits] = { 1.0, 0.65, 0.6, 1.15, 1.75, 1.45, 2.1, 0.62, 2.0 };
         out *= kitMaster[kit];
-        if (kit == 4) out = std::tanh(out * 1.35) * 0.9;    // rock: glue
-        if (kit == 7) out = std::tanh(out * 1.25) * 0.92;   // eurobeat: punchy bus
+        if (kit == 4) out = ftanh(out * 1.35) * 0.9;    // rock: glue
+        if (kit == 7) out = ftanh(out * 1.25) * 0.92;   // eurobeat: punchy bus
         if (kit == 8) {                                     // lo-fi: dull and slightly crushed
             lofiLp += (out - lofiLp) * 0.28; out = lofiLp;
             if (++hc >= 2) { hc = 0; held = std::floor(out * 96 + 0.5) / 96; }
@@ -97,19 +99,19 @@ private:
             case dKick: {
                 const double f0 = kit == 1 ? 120 : (kit == 7 ? 240 : 170), f1 = kit == 1 ? 44 : (kit == 7 ? 50 : 52);
                 const double pt = kit == 1 ? 0.045 : (kit == 7 ? 0.028 : 0.03), at = kit == 1 ? 0.55 : (kit == 7 ? 0.42 : 0.22);
-                const double f = f1 + (f0 - f1) * std::exp(-t / pt);
+                const double f = f1 + (f0 - f1) * fexp(-t / pt);
                 v.ph += f * dt; if (v.ph >= 1) v.ph -= 1;
-                amp = std::exp(-t / at);
-                s = std::sin(6.283185307 * v.ph);
-                if (kit != 1) s += (kit == 7 ? 1.3 : 0.6) * std::exp(-t / 0.003) * noise();   // click
-                s = std::tanh(s * (kit == 2 ? 2.5 : (kit == 7 ? 2.2 : 1.4)));
+                amp = fexp(-t / at);
+                s = fsin1(v.ph);
+                if (kit != 1) s += (kit == 7 ? 1.3 : 0.6) * fexp(-t / 0.003) * noise();   // click
+                s = ftanh(s * (kit == 2 ? 2.5 : (kit == 7 ? 2.2 : 1.4)));
                 if (amp < 0.0005) v.active = false;
                 break; }
             case dSnare: {
                 const double ft = kit == 1 ? 180 : 210;
                 v.ph += ft * dt; if (v.ph >= 1) v.ph -= 1;
-                const double tone = std::sin(6.283185307 * v.ph) * std::exp(-t / 0.06);
-                const double n = hp(v, noise(), 0.3) * std::exp(-t / (kit == 1 ? 0.18 : (kit == 7 ? 0.16 : 0.13))) * (kit == 7 ? 0.55 : 1.0);
+                const double tone = fsin1(v.ph) * fexp(-t / 0.06);
+                const double n = hp(v, noise(), 0.3) * fexp(-t / (kit == 1 ? 0.18 : (kit == 7 ? 0.16 : 0.13))) * (kit == 7 ? 0.55 : 1.0);
                 s = tone * 0.6 + n * 0.9;
                 if (t > 0.9) v.active = false;
                 break; }
@@ -117,37 +119,37 @@ private:
             case dOHat: {
                 double n = metal(v) * 0.5 + noise() * 0.5;
                 n = hp(v, n, 0.6);
-                amp = std::exp(-t / (lane == dCHat ? (kit == 1 ? 0.03 : 0.045) : 0.32));
+                amp = fexp(-t / (lane == dCHat ? (kit == 1 ? 0.03 : 0.045) : 0.32));
                 s = n * 0.75;
                 if (amp < 0.0005) v.active = false;
                 break; }
             case dClap: {
                 const double n = bp(v, noise(), 1200, 0.5);
                 double e = 0;
-                for (int b = 0; b < 3; ++b) { const double tb = t - b * 0.011; if (tb >= 0 && tb < 0.011) e = std::fmax(e, std::exp(-tb / 0.004)); }
-                if (t >= 0.022) e = std::fmax(e, std::exp(-(t - 0.022) / 0.11));
+                for (int b = 0; b < 3; ++b) { const double tb = t - b * 0.011; if (tb >= 0 && tb < 0.011) e = std::fmax(e, fexp(-tb / 0.004)); }
+                if (t >= 0.022) e = std::fmax(e, fexp(-(t - 0.022) / 0.11));
                 s = n * e * 2.2; amp = 1;
                 if (t > 0.8) v.active = false;
                 break; }
             case dTomL:
             case dTomH: {
-                const double f1 = lane == dTomL ? 105 : 165, f = f1 * (1 + 0.6 * std::exp(-t / 0.05));
+                const double f1 = lane == dTomL ? 105 : 165, f = f1 * (1 + 0.6 * fexp(-t / 0.05));
                 v.ph += f * dt; if (v.ph >= 1) v.ph -= 1;
-                amp = std::exp(-t / 0.28);
-                s = std::sin(6.283185307 * v.ph) + 0.15 * noise() * std::exp(-t / 0.01);
+                amp = fexp(-t / 0.28);
+                s = fsin1(v.ph) + 0.15 * noise() * fexp(-t / 0.01);
                 if (amp < 0.0005) v.active = false;
                 break; }
             case dRim: {
                 v.ph += 1650 * dt; if (v.ph >= 1) v.ph -= 1;
                 v.ph2 += 420 * dt; if (v.ph2 >= 1) v.ph2 -= 1;
-                amp = std::exp(-t / 0.018);
-                s = (std::sin(6.283185307 * v.ph) * 0.6 + std::sin(6.283185307 * v.ph2) * 0.6);
+                amp = fexp(-t / 0.018);
+                s = (fsin1(v.ph) * 0.6 + fsin1(v.ph2) * 0.6);
                 if (amp < 0.0005) v.active = false;
                 break; }
             case dCrash: {
                 double n = metal(v) * 0.6 + noise() * 0.6;
                 n = hp(v, n, 0.45);
-                amp = std::exp(-t / 1.1) * (1 - std::exp(-t / 0.002));
+                amp = fexp(-t / 1.1) * (1 - fexp(-t / 0.002));
                 s = n * 0.55;
                 if (t > 4) v.active = false;
                 break; }
@@ -187,7 +189,7 @@ private:
     static double hp(Voice& v, double x, double c) { v.lp += c * (x - v.lp); return x - v.lp; }
     // state-variable band-pass
     double bp(Voice& v, double x, double fc, double q) {
-        const double f = 2 * std::sin(3.14159265 * fc / srate);
+        const double f = 2 * fsin1(0.5 * fc / srate);
         const double hpv = x - v.lp - q * v.bp;
         v.bp += f * hpv; v.lp += f * v.bp;
         return v.bp;

@@ -9,8 +9,13 @@ namespace retrofm {
 
 FILE* retroFopenUtf8(const char* path, const char* mode);
 
-bool retroRenderSongWav(const char* path, const float* params, const char* song, const char* lyrics,
-                        const std::string* pats, const std::string* smp, const int* roots, int bpm, int loops, std::string& info)
+bool retroWriteWav(const char* path, const float* L, const float* R, size_t n, int sr);
+bool retroWriteMp3(const char* path, const float* L, const float* R, size_t n, int sr, int kbps);
+bool retroWriteOgg(const char* path, const float* L, const float* R, size_t n, int sr, float quality);
+
+// format: 0 WAV, 1 MP3 (192 kbps), 2 OGG Vorbis (q 0.6)
+bool retroRenderSong(const char* path, int format, const float* params, const char* song, const char* lyrics,
+                     const std::string* pats, const std::string* smp, const int* roots, int bpm, int loops, std::string& info)
 {
     if (!song || std::strncmp(song, "song1;", 6)) { info = "no song"; return false; }
     const int loopSteps = std::atoi(song + 6);
@@ -19,6 +24,7 @@ bool retroRenderSongWav(const char* path, const float* params, const char* song,
     std::unique_ptr<Engine> e(new Engine());
     e->setSampleRate(sr);
     for (int i = 0; i < kParamCount; ++i) if (!kParams[i].output) e->setParam(i, params[i]);
+    e->setParam(pQuality, 2.f);   // offline: always full quality
     for (int u = 0; u < 4; ++u)
     {
         if (!pats[u].empty()) e->setUserPattern(u, pats[u].c_str());
@@ -29,38 +35,31 @@ bool retroRenderSongWav(const char* path, const float* params, const char* song,
     e->setSong(song);
     e->setParam(pSongPlay, 1.f);
     if (bpm < 40 || bpm > 300) bpm = 120;
-    const double spb = bpm / 60.0 * 4.0 / sr;                    // 16ths per sample
-    const size_t frames = (size_t)(loopSteps * loops / spb) + (size_t)(sr * 2.5);   // + reverb tail
+    const double spb = bpm / 60.0 * 4.0 / sr;                                   // 16ths per sample
     const size_t stopAt = (size_t)(loopSteps * loops / spb);
-    FILE* f = retroFopenUtf8(path, "wb");
-    if (!f) { info = "cannot write file"; return false; }
-    auto w32 = [&](uint32_t v) { std::fwrite(&v, 4, 1, f); };
-    auto w16 = [&](uint16_t v) { std::fwrite(&v, 2, 1, f); };
-    const uint32_t bytes = (uint32_t)(frames * 4);
-    std::fwrite("RIFF", 1, 4, f); w32(36 + bytes); std::fwrite("WAVEfmt ", 1, 8, f);
-    w32(16); w16(1); w16(2); w32(sr); w32(sr * 4); w16(4); w16(16);
-    std::fwrite("data", 1, 4, f); w32(bytes);
+    const size_t frames = stopAt + (size_t)(sr * 2.5);                         // + reverb tail
+    std::vector<float> L(frames), R(frames);
     const int B = 256;
-    float L[B], R[B]; int16_t buf[B * 2];
     double pos = 0;
     for (size_t i = 0; i < frames; i += B)
     {
         const uint32_t n = (uint32_t)std::min<size_t>(B, frames - i);
-        if (i >= stopAt && i < stopAt + B) e->setParam(pSongPlay, 0.f);    // let the last notes ring out
+        if (i >= stopAt && i < stopAt + B) e->setParam(pSongPlay, 0.f);        // let the last notes ring out
+        e->beginBlock();
         e->transport(i < stopAt, true, pos, bpm);
-        e->process(L, R, n);
-        for (uint32_t k = 0; k < n; ++k)
-        {
-            buf[k * 2]     = (int16_t)std::lround(std::max(-1.f, std::min(1.f, L[k])) * 32767.f);
-            buf[k * 2 + 1] = (int16_t)std::lround(std::max(-1.f, std::min(1.f, R[k])) * 32767.f);
-        }
-        std::fwrite(buf, 2, n * 2, f);
+        e->process(&L[i], &R[i], n);
         pos += n * spb;
     }
-    std::fclose(f);
+    // gentle fade over the last second
+    for (size_t i = frames - (size_t)sr; i < frames; ++i) { const float g = (float)(frames - i) / sr; L[i] *= g; R[i] *= g; }
+    bool ok = false;
+    if (format == 1) ok = retroWriteMp3(path, L.data(), R.data(), frames, sr, 256);
+    else if (format == 2) ok = retroWriteOgg(path, L.data(), R.data(), frames, sr, 0.6f);
+    else ok = retroWriteWav(path, L.data(), R.data(), frames, sr);
     char b[96]; std::snprintf(b, sizeof(b), "%.0f s, %d BPM", frames / (double)sr, bpm);
     info = b;
-    return true;
+    if (!ok) info = "cannot write file";
+    return ok;
 }
 
 } // namespace retrofm

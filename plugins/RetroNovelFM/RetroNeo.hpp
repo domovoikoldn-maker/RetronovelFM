@@ -10,6 +10,7 @@
 #include <cstring>
 #include <vector>
 #include "RetroData.hpp"
+#include "RetroFast.hpp"
 #include "RetroSampler.hpp"
 
 namespace retrofm {
@@ -122,6 +123,9 @@ public:
     void setRelease(float r) { relMul = r; }
     void setBrightness(float b) { bright = std::pow(2.0f, (b - 1.f) * 2.f); }
     void setVelSens(float s) { velSens = s; }
+    // ECO: at most 3 unison oscillators per note and 14 voices
+    void setEco(bool e) { uniCap = e ? 3 : 8; voiceCap = e ? 14 : NV; }
+    void panic() { for (auto& v : voices) { v.active = false; std::memset(v.fs, 0, sizeof(v.fs)); std::memset(v.fm, 0, sizeof(v.fm)); } for (int& n : nstack) n = 0; std::fill(ks.begin(), ks.end(), 0.f); }
 
     void noteOn(int inst, int note, int vel, double transpose, float gainMul = 1.f) {
         if (!isNeo(inst)) return;
@@ -171,7 +175,8 @@ public:
     float tick(double pmul, double clock, float& outL, float& outR) {
         float act = 0;
         const double beatPh = clock / 4.0 - std::floor(clock / 4.0);
-        const double pumpShape = std::pow(std::max(0.0, 1.0 - beatPh / 0.42), 2.0);
+        const double pumpLin = std::max(0.0, 1.0 - beatPh / 0.42);
+        const double pumpShape = pumpLin * pumpLin;
         for (auto& v : voices) {
             if (!v.active) continue;
             const NeoPatch& P = neoPatches()[v.patch];
@@ -192,10 +197,10 @@ public:
             if (P.vib > 0) { v.vph += P.vibRate / srate; if (v.vph >= 1) v.vph -= 1; }
             if (kr) {
                 double pm = 1.0;
-                if (P.pitchEnv != 0) pm *= std::pow(2.0, P.pitchEnv * std::exp(-v.t / P.pitchDec) / 12.0);
+                if (P.pitchEnv != 0) pm *= fexp2(P.pitchEnv * fexp(-v.t / P.pitchDec) / 12.0);
                 if (P.vib > 0) {
                     const double ramp = std::min(1.0, std::max(0.0, (v.t - P.vibDelay) / 0.35));
-                    pm *= std::pow(2.0, std::sin(6.2831853 * v.vph) * P.vib * ramp / 1200.0);
+                    pm *= fexp2(fsin1(v.vph) * P.vib * ramp / 1200.0);
                 }
                 v.pmK = pm;
             }
@@ -209,13 +214,13 @@ public:
             // filter
             double lfo = 0;
             if (P.lfoAmt > 0) {
-                if (P.lfoSync > 0) { const double ph = clock / P.lfoSync; lfo = -std::cos(6.2831853 * (ph - std::floor(ph))); }
-                else { v.lph += P.lfoRate / srate; if (v.lph >= 1) v.lph -= 1; lfo = std::sin(6.2831853 * v.lph); }
+                if (P.lfoSync > 0) { const double ph = clock / P.lfoSync; lfo = -fcos1(ph); }
+                else { v.lph += P.lfoRate / srate; if (v.lph >= 1) v.lph -= 1; lfo = fsin1(v.lph); }
             }
             if (P.cutoff < 17500 || P.filt != nfLP || P.envAmt > 0 || P.lfoAmt > 0) {
                 if (kr) {
                     const double velAmt = 0.5 + 0.5 * v.vel;
-                    double fc = P.cutoff * std::pow(2.0, P.envAmt * v.fenv * velAmt + P.lfoAmt * lfo * 0.5 + P.keyTrack * (v.note - 60) / 12.0) * bright;
+                    double fc = P.cutoff * fexp2(P.envAmt * v.fenv * velAmt + P.lfoAmt * lfo * 0.5 + P.keyTrack * (v.note - 60) / 12.0) * bright;
                     fc = std::max(25.0, std::min(fc, srate * 0.45));
                     const double g = std::tan(3.14159265 * fc / srate);
                     v.fk = 2.0 - 1.96 * P.reso;
@@ -224,7 +229,7 @@ public:
                 l = svf(v.fs[0], v.fs[1], l, v.fa1, v.fa2, v.fa3, v.fk, P.filt);
                 r = svf(v.fs[2], v.fs[3], r, v.fa1, v.fa2, v.fa3, v.fk, P.filt);
             }
-            if (P.drive > 0) { const float dg = 1.f + P.drive; const float nrm = 1.f / std::tanh(dg * 0.6f); l = std::tanh(l * dg * 0.6f) * nrm * 0.8f; r = std::tanh(r * dg * 0.6f) * nrm * 0.8f; }
+            if (P.drive > 0) { const float dg = 1.f + P.drive; const float nrm = 1.f / ftanh(dg * 0.6f); l = ftanh(l * dg * 0.6f) * nrm * 0.8f; r = ftanh(r * dg * 0.6f) * nrm * 0.8f; }
             if (P.crush > 0) {
                 const int hold = 1 + (int)(P.crush * 5);
                 if (++v.crushCnt >= hold) { v.crushCnt = 0; const float q = std::pow(2.f, 9.f - 4.f * P.crush); v.chL = std::floor(l * q + 0.5f) / q; v.chR = std::floor(r * q + 0.5f) / q; }
@@ -242,12 +247,13 @@ private:
     struct Voice {
         bool active = false, released = false, held = false, mono = false;
         int note = 0, patch = 0, stage = 0, fstage = 0, vowel = 0, crushCnt = 0;
-        uint32_t age = 0;
+        uint32_t age = 0; int uni = 1;
         double freq = 440, target = 440, t = 0, vph = 0, lph = 0;
         double ph[8] = {0}, ph2[8] = {0}, subPh = 0, fmPh = 0, fm2Ph = 0, cbPh[2] = {0, 0};
         float pan[8] = {0};
         double det[8] = {1, 1, 1, 1, 1, 1, 1, 1};   // unison detune ratios (computed once per note)
-        double pmK = 1, fa1 = 1, fa2 = 0, fa3 = 0, fk = 2; uint32_t kr = 0;
+        double pmK = 1, fa1 = 1, fa2 = 0, fa3 = 0, fk = 2, osc2R = 1; uint32_t kr = 0;
+        double vx[2][3] = {{1, 0, 0}, {1, 0, 0}};   // formant filter coefficients (fixed per note)
         float env = 0, fenv = 0, vel = 1, amp = 1, chL = 0, chR = 0;
         double atk = 1, dec = 1, rel = 1, fatk = 1, fdec = 1;
         float fs[4] = {0, 0, 0, 0}, fm[4][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
@@ -279,7 +285,7 @@ private:
         switch (P.osc) {
         case noSaw:
         case noSquare: {
-            const int n = P.uni;
+            const int n = v.uni;
             for (int k = 0; k < n; ++k) {
                 const double det = v.det[k];
                 const double d = dt * det;
@@ -288,7 +294,7 @@ private:
                 if (P.osc == noSaw) o = (2 * v.ph[k] - 1) - blep(v.ph[k], d);
                 else { o = (v.ph[k] < P.pw ? 1.0 : -1.0) - (2.0 * P.pw - 1.0); o += blep(v.ph[k], d); double q = v.ph[k] + 1.0 - P.pw; q -= std::floor(q); o -= blep(q, d); }
                 if (P.osc2Lvl > 0) {
-                    const double d2 = d * std::pow(2.0, P.osc2Semi / 12.0);
+                    const double d2 = d * v.osc2R;
                     v.ph2[k] += d2; if (v.ph2[k] >= 1) v.ph2[k] -= 1;
                     o += ((2 * v.ph2[k] - 1) - blep(v.ph2[k], d2)) * P.osc2Lvl;
                 }
@@ -301,21 +307,21 @@ private:
         }
         case noSine: {
             v.ph[0] += dt; if (v.ph[0] >= 1) v.ph[0] -= 1;
-            const float o = (float)std::sin(6.2831853 * v.ph[0]) * 0.8f;
+            const float o = fsin1(v.ph[0]) * 0.8f;
             l = r = o;
             break;
         }
         case noFM: {
             const int n = std::max(1, std::min(2, P.uni));
-            const double mi = P.fmIndex * std::exp(-v.t / P.fmDecay) * (0.5 + 0.5 * v.vel);
-            const double mi2 = P.fm2Index * std::exp(-v.t / P.fm2Decay) * v.vel;
+            const double mi = P.fmIndex * fexp(-v.t / P.fmDecay) * (0.5 + 0.5 * v.vel);
+            const double mi2 = P.fm2Index * fexp(-v.t / P.fm2Decay) * v.vel;
             for (int k = 0; k < n; ++k) {
                 const double det = n == 1 ? 1.0 : v.det[k ? 7 : 0];
                 v.ph[k] += dt * det; if (v.ph[k] >= 1) v.ph[k] -= 1;
                 v.ph2[k] += dt * det * P.fmRatio; if (v.ph2[k] >= 1) v.ph2[k] -= 1;
                 v.ph2[k + 4] += dt * det * P.fm2Ratio; if (v.ph2[k + 4] >= 1) v.ph2[k + 4] -= 1;
-                const double mod = std::sin(6.2831853 * v.ph2[k]) * mi + std::sin(6.2831853 * v.ph2[k + 4]) * mi2;
-                const float o = (float)std::sin(6.2831853 * v.ph[k] + mod) * 0.6f;
+                const double mod = fsin1(v.ph2[k]) * mi + fsin1(v.ph2[k + 4]) * mi2;
+                const float o = fsin1(v.ph[k] + mod * 0.15915494309189535) * 0.6f;
                 const float pn = n == 1 ? 0.f : (k ? 0.5f : -0.5f);
                 l += o * (1.f - pn); r += o * (1.f + pn);
             }
@@ -337,15 +343,9 @@ private:
             // saw through two formant resonators (vowel per note, or a fixed instrument body)
             v.ph[0] += dt; if (v.ph[0] >= 1) v.ph[0] -= 1;
             const double saw = (2 * v.ph[0] - 1) - blep(v.ph[0], dt) + noise() * P.noise * 6.0;
-            static const float F[6][2] = { {800, 1200}, {420, 2000}, {300, 2500}, {470, 860}, {330, 760}, {1050, 2650} };
-            const int vw = P.formant >= 0 ? P.formant : v.vowel;
             float o = 0;
-            for (int k = 0; k < 2; ++k) {
-                const double fc = std::min((double)F[vw][k], srate * 0.4);
-                const double g = std::tan(3.14159265 * fc / srate), kk = k ? 0.22 : 0.16;
-                const double a1 = 1.0 / (1.0 + g * (g + kk)), a2 = g * a1, a3 = g * a2;
-                o += svf(v.fm[k][0], v.fm[k][1], (float)saw, a1, a2, a3, kk, nfBP) * (k ? 0.55f : 1.f);
-            }
+            for (int k = 0; k < 2; ++k)
+                o += svf(v.fm[k][0], v.fm[k][1], (float)saw, v.vx[k][0], v.vx[k][1], v.vx[k][2], k ? 0.22 : 0.16, nfBP) * (k ? 0.55f : 1.f);
             if (P.formant == 5) o = o * 0.7f + (float)saw * 0.12f;    // erhu: keep some raw bow
             l = r = o * 0.5f;
             break;
@@ -381,16 +381,16 @@ private:
         }
         if (P.sub > 0) {
             v.subPh += dt * 0.5; if (v.subPh >= 1) v.subPh -= 1;
-            const float s = (float)std::sin(6.2831853 * v.subPh) * P.sub;
+            const float s = fsin1(v.subPh) * P.sub;
             l += s; r += s;
         }
         if (P.noise > 0 && P.osc != noVox) { const float nz = noise() * P.noise; l += nz; r += nz; }
     }
 
     Voice& alloc() {
-        for (auto& v : voices) if (!v.active) return v;
+        for (int i = 0; i < voiceCap; ++i) if (!voices[i].active) return voices[i];
         Voice* best = &voices[0]; float bl = 1e9f;
-        for (auto& v : voices) { const float l = v.env * v.amp * (v.released ? 0.3f : 1.f); if (l < bl) { bl = l; best = &v; } }
+        for (int i = 0; i < voiceCap; ++i) { Voice& v = voices[i]; const float l = v.env * v.amp * (v.released ? 0.3f : 1.f); if (l < bl) { bl = l; best = &v; } }
         return *best;
     }
     void start(Voice& v, int pi, int note, int vel, double f, float gainMul) {
@@ -412,14 +412,25 @@ private:
         for (int k = 0; k < 8; ++k) {
             rng = rng * 1664525u + 1013904223u; v.ph[k] = (rng >> 8) / 16777216.0;
             rng = rng * 1664525u + 1013904223u; v.ph2[k] = (rng >> 8) / 16777216.0;
-            v.pan[k] = P.uni <= 1 ? 0.f : P.spread * ((k - (P.uni - 1) * 0.5f) / ((P.uni - 1) * 0.5f)) * ((k & 1) ? -1.f : 1.f);
+            v.pan[k] = 0.f;
         }
         if (P.osc == noFM || P.osc == noSine) { for (int k = 0; k < 8; ++k) { v.ph[k] = 0; v.ph2[k] = 0; } }
         v.subPh = 0; v.cbPh[0] = v.cbPh[1] = 0;
-        v.kr = 0; v.pmK = 1;
-        for (int k = 0; k < 8; ++k) v.det[k] = P.uni <= 1 ? 1.0 : std::pow(2.0, ((k - (P.uni - 1) * 0.5) / ((P.uni - 1) * 0.5)) * P.detune / 1200.0);
+        v.kr = 0; v.pmK = 1; v.osc2R = std::pow(2.0, P.osc2Semi / 12.0);
+        v.uni = std::max(1, std::min(P.uni, uniCap));
+        for (int k = 0; k < 8; ++k) v.det[k] = v.uni <= 1 ? 1.0 : std::pow(2.0, ((k - (v.uni - 1) * 0.5) / ((v.uni - 1) * 0.5)) * P.detune / 1200.0);
+        for (int k = 0; k < 8; ++k) v.pan[k] = v.uni <= 1 ? 0.f : P.spread * ((k - (v.uni - 1) * 0.5f) / ((v.uni - 1) * 0.5f)) * ((k & 1) ? -1.f : 1.f);
         if (P.osc == noFM) { v.det[0] = std::pow(2.0, -P.detune / 1200.0); v.det[7] = std::pow(2.0, P.detune / 1200.0); }   // FM: two copies
         v.vowel = (vowelCounter++) % 5;
+        if (P.osc == noVox) {
+            static const float F[6][2] = { {800, 1200}, {420, 2000}, {300, 2500}, {470, 860}, {330, 760}, {1050, 2650} };
+            const int vw = P.formant >= 0 ? P.formant : v.vowel;
+            for (int k = 0; k < 2; ++k) {
+                const double fc = std::min((double)F[vw][k], srate * 0.4);
+                const double g = std::tan(3.14159265 * fc / srate), kk = k ? 0.22 : 0.16;
+                v.vx[k][0] = 1.0 / (1.0 + g * (g + kk)); v.vx[k][1] = g * v.vx[k][0]; v.vx[k][2] = g * v.vx[k][1];
+            }
+        }
         v.z = nullptr;
         if (P.osc == noSample && P.sample) {
             const int set = bank.find(P.sample);
@@ -456,6 +467,7 @@ private:
     double srate = 44100, lastMonoFreq = 0;
     int lastMonoPatch = -1;
     float relMul = 1, bright = 1, velSens = 1;
+    int uniCap = 8, voiceCap = NV;
     int stack[kNumNeo][16]; int nstack[kNumNeo] = {0}; int vowelCounter = 0;
     uint32_t serial = 0, rng = 0x13579bdfu;
 };

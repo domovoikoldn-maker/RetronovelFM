@@ -15,8 +15,8 @@
 
 namespace retrofm {
 uint32_t winTranslateTyped(uint32_t hostChar);
-bool retroRenderSongWav(const char* path, const float* params, const char* song, const char* lyrics,
-                        const std::string* pats, const std::string* smp, const int* roots, int bpm, int loops, std::string& info);
+bool retroRenderSong(const char* path, int format, const float* params, const char* song, const char* lyrics,
+                     const std::string* pats, const std::string* smp, const int* roots, int bpm, int loops, std::string& info);
 bool winCtrlDown();
 bool winKeyVDown();
 bool winLayoutIsCyrillic();
@@ -50,7 +50,7 @@ enum CtlType { ctSelect, ctKnob, ctToggle, ctAction, ctEraTab, ctLoad, ctClearSm
                ctGenre, ctGenrePat, ctKitStep,
                ctToolsOpen, ctToolsClose, ctHarmonyOpen, ctHarmonyClose, ctMeterOpen, ctMeterPick, ctSongGen, ctSongToggle,
                ctVoiceType, ctXPPage, ctSavePreset, ctLoadPreset, ctExportPack, ctImportPack, ctMidiTake, ctMidiSong, ctClearTake,
-               ctSlot, ctSlotStore, ctHarmKey, ctHarmScale, ctHarmChord, ctHarmLock, ctWavSong };
+               ctSlot, ctSlotStore, ctHarmKey, ctHarmScale, ctHarmChord, ctHarmLock, ctWavSong, ctQuality, ctAudioFmt };
 // control groups: 0 = always, 1..3 = only on that era tab (FM / XP / user), 10 = drum editor overlay
 enum CtlGroup { gAlways = 0, gFM = 1, gXP = 2, gUser = 3, gEditor = 10, gVocal = 11, gInst = 12, gRock = 13, gScenes = 14, gStoryMenu = 15,
                 gReiwa = 16, gHarmony = 17, gTools = 18, gMeter = 19, gXP2 = 20, gXPTabs = 21 };
@@ -129,10 +129,15 @@ protected:
             fInited = true;
         }
         fParams[index] = value;
-        repaint();
+        if (!kParams[index].output) repaint();   // meters are redrawn by the frame timer below
     }
 
-    void uiIdle() override { repaint(); }
+    // redraw at most 40 times a second (20 in ECO or under heavy load): leaves CPU for the DAW
+    void uiIdle() override
+    {
+        const bool light = (int)std::lround(fParams[pQuality]) == 1 || fParams[pOutCpu] > 0.6f;
+        if (now() - fLastPaint >= (light ? 0.05f : 0.025f)) repaint();
+    }
 
     // DSP state -> UI (user samples, roots, user drum patterns)
     void stateChanged(const char* key, const char* value) override
@@ -156,6 +161,7 @@ protected:
     {
         const float sc = getHeight() / kH;
         fT = now();
+        fLastPaint = fT;
         save();
         scale(sc, sc);
        #ifdef RETRO_SCREENSHOT
@@ -364,8 +370,15 @@ protected:
                 if (fSongText.empty()) { status("Сначала нажми RANDOM SONG"); break; }
                 openFile(faMidiSong, true, "random_song.mid", "Export MIDI (.mid)"); break;
             case ctWavSong:
+            {
                 if (fSongText.empty()) { status("Сначала нажми RANDOM SONG"); break; }
-                openFile(faWavSong, true, "random_song.wav", "Export WAV (.wav)"); break;
+                static const char* const names[3] = { "random_song.wav", "random_song.mp3", "random_song.ogg" };
+                static const char* const titles[3] = { "Export WAV", "Export MP3", "Export OGG" };
+                openFile(faWavSong, true, names[fAudioFmt], titles[fAudioFmt]);
+                break;
+            }
+            case ctAudioFmt: fAudioFmt = (int)c.value; break;
+            case ctQuality: setParam(pQuality, c.value); break;
             case ctClearTake: retroTakeClear(getPluginInstancePointer()); setState("take", ""); status("Запись очищена"); break;
             case ctSlot:
             {
@@ -826,7 +839,9 @@ private:
         }
         addCtl(ctExportPack, 0, 0, 104.f, 314.f, 180.f, 30.f, "EXPORT PACK", gTools);
         addCtl(ctImportPack, 0, 0, 292.f, 314.f, 180.f, 30.f, "IMPORT PACK", gTools);
-        addCtl(ctWavSong, 0, 0, 500.f, 314.f, 250.f, 30.f, "EXPORT WAV: RANDOM SONG", gTools);
+        addCtl(ctWavSong, 0, 0, 500.f, 314.f, 196.f, 30.f, "EXPORT AUDIO", gTools);
+        for (int k = 0; k < 3; ++k) addCtl(ctAudioFmt, 0, (float)k, 702.f + k * 54.f, 314.f, 50.f, 30.f, k == 0 ? "WAV" : (k == 1 ? "MP3" : "OGG"), gTools);
+        for (int k = 0; k < 3; ++k) addCtl(ctQuality, pQuality, (float)k, 580.f + k * 70.f, 116.f, 66.f, 30.f, kQualityNames[k], gTools);
         addCtl(ctMidiTake, 0, 0, 104.f, 396.f, 250.f, 30.f, "EXPORT MIDI: MY TAKE", gTools);
         addCtl(ctMidiSong, 0, 0, 362.f, 396.f, 250.f, 30.f, "EXPORT MIDI: RANDOM SONG", gTools);
         addCtl(ctClearTake, 0, 0, 620.f, 396.f, 130.f, 30.f, "CLEAR TAKE", gTools);
@@ -1014,12 +1029,13 @@ private:
         {
             std::string pats[4], info;
             for (int u = 0; u < 4; ++u) pats[u] = userPatString(u);
-            const std::string path = withExt(filename, ".wav");
+            static const char* const exts[3] = { ".wav", ".mp3", ".ogg" };
+            const std::string path = withExt(filename, exts[fAudioFmt]);
             float pr[kParamCount];
             for (int i = 0; i < kParamCount; ++i) pr[i] = fParams[i];
-            if (retroRenderSongWav(path.c_str(), pr, fSongText.c_str(), fLyrics.c_str(), pats, fSmpPath, fRoot, fSongBpm, 2, info))
-                status("WAV сохранён: " + std::string(baseName(path.c_str())) + " (" + info + ")");
-            else status("Не удалось сохранить WAV");
+            if (retroRenderSong(path.c_str(), fAudioFmt, pr, fSongText.c_str(), fLyrics.c_str(), pats, fSmpPath, fRoot, fSongBpm, 2, info))
+                status("Сохранено: " + std::string(baseName(path.c_str())) + " (" + info + ")");
+            else status("Не удалось сохранить файл");
             break;
         }
         case faMidiSong:
@@ -1470,6 +1486,11 @@ private:
         label(122, 84, "TOOLS", 17.f, Color(60, 40, 110), ALIGN_LEFT | ALIGN_BASELINE);
         label(190, 84, "пресеты .rnfm, слоты, паки и экспорт MIDI \xE2\x80\xA2 всё сохраняется в проекте DAW", 10.5f, Color(110, 90, 150), ALIGN_LEFT | ALIGN_BASELINE);
         label(104, 110, "ПРЕСЕТ: ВСЕ РУЧКИ, ИНСТРУМЕНТ, БАРАБАНЫ, СЦЕНА, ТЕКСТ, ПЕСНЯ", 9.f, Color(110, 90, 150), ALIGN_LEFT | ALIGN_BASELINE);
+        {
+            char cpu[96]; std::snprintf(cpu, sizeof(cpu), "CPU: нагрузка %d%%", (int)std::lround(fParams[pOutCpu] * 100));
+            label(500, 110, "РЕЖИМ ПРОЦЕССОРА (AUTO \xE2\x80\x94 сам облегчает звук при нагрузке)", 9.f, Color(110, 90, 150), ALIGN_LEFT | ALIGN_BASELINE);
+            label(792, 136, cpu, 10.f, Color(150, 70, 30), ALIGN_LEFT | ALIGN_BASELINE);
+        }
         label(104, 190, "8 СЛОТОВ: КЛИК \xE2\x80\x94 ЗАГРУЗИТЬ, SAVE \xE2\x80\x94 СОХРАНИТЬ ТЕКУЩИЙ ЗВУК", 9.f, Color(110, 90, 150), ALIGN_LEFT | ALIGN_BASELINE);
         label(104, 390, "MIDI", 9.f, Color(110, 90, 150), ALIGN_LEFT | ALIGN_BASELINE);
         std::vector<RecEvent> tk; double bpm = 0; int takeNotes = 0;
@@ -1492,7 +1513,15 @@ private:
             }
             case ctMidiSong: chip(c, false, 0xff8a3a, fSongText.empty() ? "\xE2\x99\xAB MIDI: RANDOM SONG (нет песни)" : "\xE2\x99\xAB EXPORT MIDI: RANDOM SONG", 10.5f); break;
             case ctClearTake: chip(c, false, 0x9a8aa8, "CLEAR TAKE", 10.5f); break;
-            case ctWavSong: chip(c, false, 0x3fae6a, fSongText.empty() ? "\xE2\x99\xAB WAV: RANDOM SONG (нет песни)" : "\xE2\x99\xAB EXPORT WAV: RANDOM SONG", 10.5f); break;
+            case ctWavSong:
+            {
+                static const char* const fn[3] = { "WAV", "MP3", "OGG" };
+                char b[80]; std::snprintf(b, sizeof(b), fSongText.empty() ? "\xE2\x99\xAB %s (нет песни)" : "\xE2\x99\xAB EXPORT SONG \xE2\x86\x92 %s", fn[fAudioFmt]);
+                chip(c, false, 0x3fae6a, b, 10.5f);
+                break;
+            }
+            case ctAudioFmt: chip(c, (int)c.value == fAudioFmt, 0x3fae6a, c.label, 10.5f); break;
+            case ctQuality: chip(c, (int)c.value == clampi((int)std::lround(fParams[pQuality]), 0, 2), 0xff8a3a, c.label, 11.f); break;
             case ctSlotStore: break;   // drawn with the slot card
             case ctSlot:
             {
@@ -3207,7 +3236,12 @@ private:
             fill(); strokeWidth(1.5f); strokeColor(on || c.type == ctSongGen ? Color(255, 255, 255) : hexc(C.accent, 0.8f)); stroke();
             label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, t, c.type == ctHarmonyOpen ? 10.5f : 11.5f, on || c.type == ctSongGen ? Color(255, 255, 255) : hexc(C.accent), ALIGN_CENTER | ALIGN_MIDDLE);
         }
-        label(944, 28, "v8.6", 10.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
+        label(944, 24, "v8.7", 10.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
+        {
+            const int cpu = (int)std::lround(fParams[pOutCpu] * 100);
+            char b[24]; std::snprintf(b, sizeof(b), "CPU %d%%", cpu);
+            label(944, 38, b, 8.5f, cpu > 60 ? Color(220, 60, 60) : Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
+        }
     }
 
     // small round arrows in a panel header (instrument / idol browsing)
@@ -3634,6 +3668,8 @@ private:
     int fFileAction = faNone;
     uint32_t fSongSeed = 1;
     int fSongBpm = 120;
+    int fAudioFmt = 1;   // 0 WAV, 1 MP3, 2 OGG
+    float fLastPaint = -1;
     int fCtlCount = 0;
     int fDrag = -1;
     float fDragY = 0, fDragV = 0, fMouseX = -1, fMouseY = -1;

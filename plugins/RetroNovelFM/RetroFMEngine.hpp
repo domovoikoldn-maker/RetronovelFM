@@ -8,6 +8,7 @@
 #include <memory>
 #include <vector>
 #include "RetroData.hpp"
+#include "RetroFast.hpp"
 #include "RetroDrums.hpp"
 #include "RetroSampler.hpp"
 #include "RetroVocal.hpp"
@@ -404,6 +405,17 @@ public:
     // ---- MIDI out: the Random Song's notes, so the DAW can record them (ch 1 melody, 2 chords, 3 bass)
     struct OutEvent { uint32_t frame; uint8_t d[3]; };
     void beginBlock() { frameInBlock = 0; nOut = 0; }
+    // AUTO mode: switch to lighter voices while the DSP uses more than ~55% of the time budget
+    void setCpuLoad(float load) {
+        if (!autoEco && load > 0.55f) autoEco = true;
+        else if (autoEco && load < 0.28f) autoEco = false;
+        applyQuality();
+    }
+    void applyQuality() {
+        const int q = (int)std::floor(params[pQuality] + 0.5f);
+        const bool eco = q == 1 || (q == 0 && autoEco);
+        neo.setEco(eco); sampler.setEco(eco);
+    }
     int outCount() const { return nOut; }
     const OutEvent& outEvent(int i) const { return outQ[i]; }
 
@@ -412,7 +424,8 @@ public:
         clock += rStepsPerSample;
         songTick();
         vph += vrateInc; if (vph >= 1) vph -= 1;
-        const double pmul = bendmul * std::pow(2.0, std::sin(kTwoPi * vph) * (params[pVibDepth] + modwheel * 40) / 1200.0);
+        const double vdep = params[pVibDepth] + modwheel * 40;
+        const double pmul = vdep > 0 ? bendmul * fexp2(fsin1(vph) * vdep / 1200.0) : bendmul;
         double mix = 0, act = 0;
         rhythmTick();
         float sL = 0, sR = 0;
@@ -430,10 +443,10 @@ public:
             for (int k = 0; k < 4; ++k) e[k] = env(v, k);
             double a[4];
             for (int k = 0; k < 4; ++k) a[k] = e[k] * pc.el[k] * (pc.car[k] ? v.vc : v.vm);
-            const double o1 = std::sin(kTwoPi * (v.ph[0] + pc.fb * (v.fb0 + v.fb1) * 0.5)) * a[0];
+            const double o1 = fsin1(v.ph[0] + pc.fb * (v.fb0 + v.fb1) * 0.5) * a[0];
             v.fb1 = v.fb0; v.fb0 = o1;
             double o2, o3, o4, out = 0;
-            auto S = [&](int k, double m) { return std::sin(kTwoPi * (v.ph[k] + m)) * a[k]; };
+            auto S = [&](int k, double m) { return fsin1(v.ph[k] + m) * a[k]; };
             switch (pc.alg) {
                 case 0: o2 = S(1,o1); o3 = S(2,o2); o4 = S(3,o3); out = o4; break;
                 case 1: o2 = S(1,0); o3 = S(2,o1+o2); o4 = S(3,o3); out = o4; break;
@@ -460,8 +473,8 @@ public:
         }
         chb[cw] = (float)dry;
         cph += 0.7 / srate; if (cph >= 1) cph -= 1;
-        const double tapL = chread((0.012 + 0.003 * std::sin(kTwoPi * cph)) * srate);
-        const double tapR = chread((0.012 + 0.003 * std::cos(kTwoPi * cph)) * srate);
+        const double tapL = chread((0.012 + 0.003 * fsin1(cph)) * srate);
+        const double tapR = chread((0.012 + 0.003 * fcos1(cph)) * srate);
         if (++cw >= CHN) cw = 0;
         const double chm = params[pChorus];
         const double L = dry * (1 - 0.4 * chm) + tapL * 0.7 * chm + side;
@@ -486,7 +499,21 @@ public:
         limG = want < limG ? want + (limG - want) * limAtk : want + (limG - want) * limRel;
         outL = (float)softclip(oL * limG);
         outR = (float)softclip(oR * limG);
+        if (badFloat(outL) || badFloat(outR)) { panicReset(); outL = outR = 0.f; }
     }
+
+    // a broken value (NaN / inf) must never reach the DAW or stay in the effects: clear everything
+    void panicReset() {
+        for (auto& v : voices) v.active = false;
+        sampler.panic(); neo.panic(); vocal.allOff(); drums.panic();
+        std::memset(rvBuf, 0, sizeof(rvBuf)); for (double& x : rvSt) x = 0;
+        std::memset(chb, 0, sizeof(chb));
+        dcxL = dcxR = dcpL = dcpR = 0; limG = 1; held = 0;
+        nr = 0; arpNote = -1; nSongOn = 0; songResync = true;
+        for (int k = 0; k < 128; ++k) chordN[k] = 0;
+        ++panics;
+    }
+    int panics = 0;
 
 private:
     struct Voice {
@@ -645,6 +672,7 @@ private:
         sampler.setBrightness(params[pBrightness]);
         drums.setKit((int)std::floor(params[pDrumKit] + 0.5f));
         drumGain = std::pow(10.0, params[pDrumVolume] / 20.0);
+        applyQuality();
         // the song preview runs on its own clock when neither the DAW nor the drums are running
         freeSong = true;
     }
@@ -652,7 +680,7 @@ private:
     static double softclip(double x) {
         const double a = std::fabs(x);
         if (a <= 0.8) return x;
-        const double y = 0.8 + 0.2 * std::tanh((a - 0.8) / 0.2);
+        const double y = 0.8 + 0.2 * ftanh((a - 0.8) / 0.2);
         return x < 0 ? -y : y;
     }
 
@@ -700,6 +728,7 @@ private:
     SongOn songOn[64]; int nSongOn = 0; int64_t lastSongStep = INT64_MIN;
     double clock = 0, lastBpm = 120;
     OutEvent outQ[512]; int nOut = 0; uint32_t frameInBlock = 0;
+    bool autoEco = false;
     double dcR = 0.999, dcxL = 0, dcxR = 0, dcpL = 0, dcpR = 0, limG = 1, limAtk = 0.9, limRel = 0.9999;
     Recorder rec;
 public:

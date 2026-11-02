@@ -9,6 +9,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "RetroFast.hpp"
 
 namespace retrofm {
 
@@ -239,12 +240,12 @@ public:
         t += dt; vibT += dt;
         // ---- pitch: portamento + vibrato + jitter
         const double gl = std::max(0.004, vp.glide * 0.001 * (legatoStart ? 1.0 : 0.35));
-        f0 += (targetHz - f0) * (1.0 - std::exp(-dt / gl));
+        f0 += (targetHz - f0) * (1.0 - fexp(-dt / gl));
         const double vibAmt = vp.vib * std::min(1.0, std::max(0.0, (vibT - 0.25) / 0.4));
         vibPh += vp.vibRate * dt; if (vibPh >= 1) vibPh -= 1;
         rng = rng * 1664525u + 1013904223u;
         jit += (((rng >> 9) / 4194304.0 - 1.0) * 0.5 - jit) * 0.0008;
-        const double hz = f0 * pmul * std::pow(2.0, (std::sin(6.2831853 * vibPh) * vibAmt + jit * 8.0) / 1200.0);
+        const double hz = f0 * pmul * fexp2((fsin1(vibPh) * vibAmt + jit * 8.0) / 1200.0);
 
         // ---- articulation
         float av = 1.f, ah = 0.f, af = 0.f;
@@ -301,14 +302,14 @@ public:
         // high notes: singers raise the first formant above the pitch
         if (tF[0] < hz * 1.1) tF[0] = (float)std::min(hz * 1.1, 1100.0);
 
-        const float k = 1.f - std::exp(-(float)dt / smooth);
+        const float k = 1.f - (float)fexp(-dt / smooth);
         for (int i = 0; i < 5; ++i) { F[i] += (tF[i] - F[i]) * k; B[i] += (tB[i] - B[i]) * k; }
 
         // ---- envelope
-        if (gate) env += (1.f - env) * (1.f - std::exp(-(float)dt / 0.02f));
+        if (gate) env += (1.f - env) * (1.f - (float)fexp(-dt / 0.02));
         else {
             relT += dt;
-            env *= std::exp(-(float)dt / (0.09f * relMul + 0.01f));
+            env *= (float)fexp(-dt / (0.09 * relMul + 0.01));
             if (env < 0.0003f) { active = false; return 0.f; }
         }
         avS += (av - avS) * 0.004f; ahS += (ah - ahS) * 0.01f; afS += (af - afS) * 0.02f;
@@ -317,8 +318,8 @@ public:
         ph += hz * dt; if (ph >= 1) ph -= 1;
         const double oq = 0.6 - 0.15 * vp.bright, tp = oq * 0.8, tn = oq - tp;
         double g;
-        if (ph < tp) g = 0.5 * (1 - std::cos(3.14159265 * ph / tp));
-        else if (ph < oq) g = std::cos(1.5707963 * (ph - tp) / tn);
+        if (ph < tp) g = 0.5 * (1 - fcos1(0.5 * ph / tp));
+        else if (ph < oq) g = fcos1(0.25 * (ph - tp) / tn);
         else g = 0;
         const double dg = (g - gPrev) * srate / std::max(80.0, hz) * 0.05;
         gPrev = g;
@@ -343,7 +344,8 @@ public:
             out += bandNoise(nz, *c) * afS * 0.5;
         }
         mouth += ((inCons && c && (c->key[0] == 'm' || c->key[0] == 'p' || c->key[0] == 'b') ? 0.f : kMouth[sy.vowel] * env) - mouth) * 0.003f;
-        return (float)(out * env * (0.55 + 0.45 * velocity) * 0.32 * std::pow(std::max(1.0, hz / 200.0), -0.45));
+        if ((coefCount & 15) == 1 || hzScale <= 0) hzScale = std::pow(std::max(1.0, hz / 200.0), -0.45);
+        return (float)(out * env * (0.55 + 0.45 * velocity) * 0.32 * hzScale);
     }
 
     float mouthOpen() const { return mouth; }
@@ -360,9 +362,9 @@ private:
     void updateCoefs() {
         for (int i = 0; i < 5; ++i) {
             const double f = std::min((double)F[i], srate * 0.45), bw = B[i];
-            const double r = std::exp(-3.14159265 * bw / srate);
+            const double r = fexp(-3.14159265 * bw / srate);
             Cc[i] = -r * r;
-            Bc[i] = 2 * r * std::cos(6.2831853 * f / srate);
+            Bc[i] = 2 * r * fcos1(f / srate);
             A[i] = 1 - Bc[i] - Cc[i];
         }
     }
@@ -371,7 +373,7 @@ private:
         const double fs[2] = { c.nf1, c.nf2 }, bs[2] = { c.nb1, c.nb2 }, gs[2] = { c.ng1, c.ng2 };
         for (int b = 0; b < 2; ++b) {
             if (gs[b] <= 0) continue;
-            const double fc = 2 * std::sin(3.14159265 * std::min(fs[b], srate * 0.24) / srate);
+            const double fc = 2 * fsin1(0.5 * std::min(fs[b], srate * 0.24) / srate);
             const double q = std::min(1.5, bs[b] / std::max(100.0, fs[b]) * 1.4);
             const double hp = nz - nl[b] - q * nb[b];
             nb[b] += fc * hp; nl[b] += fc * nb[b];
@@ -389,6 +391,7 @@ private:
     int syl = 0, curSyl = -1;
     Syllable sy;
     bool active = false, gate = false, legatoStart = false, onsetSet = false, coefInit = false;
+    double hzScale = 0;
     int held[16]; int nheld = 0;
     double t = 0, consDur = 0, relT = 0, vibT = 0, vibPh = 0, jit = 0;
     double f0 = 220, targetHz = 220, ph = 0, gPrev = 0, tilt = 0;

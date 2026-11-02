@@ -14,8 +14,9 @@ enum Param {
     pScene, pDrumGenre,
     // v8: meter, groove, harmony helper, song player
     pMeter, pSwing, pHumanize, pKey, pScale, pChord, pScaleLock, pSongPlay,
+    pQuality,
     // outputs (DSP -> UI)
-    pOutActivity, pOutDrumStep, pOutBeat, pOutMouth, pOutVowel, pOutSyll,
+    pOutActivity, pOutDrumStep, pOutBeat, pOutMouth, pOutVowel, pOutSyll, pOutCpu,
     kParamCount
 };
 
@@ -58,12 +59,14 @@ static const ParamInfo kParams[kParamCount] = {
     {"Chord Helper",     "chord",      "",      0,    0,    5, true,  false},
     {"Scale Lock",       "scalelock",  "",      0,    0,    1, true,  false},
     {"Song Player",      "songplay",   "",      0,    0,    1, true,  false},
+    {"CPU Mode",         "quality",    "",      0,    0,    2, true,  false},
     {"Activity",         "activity",   "",      0,    0,    1, false, true},
     {"Drum Step",        "drumstep",   "",     -1,   -1,   23, true,  true},
     {"Beat",             "beat",       "",      0,    0,    1, false, true},
     {"Mouth",            "mouth",      "",      0,    0,    1, false, true},
     {"Vowel",            "vowel",      "",      0,    0,    5, true,  true},
     {"Syllable",         "syllable",   "",     -1,   -1, 1023, true,  true},
+    {"CPU Load",         "cpuload",    "",      0,    0,    1, false, true},
 };
 
 // eras: 0..23 PC-98 FM, 24..53 Windows XP / 2000s samples, 54..57 user sample slots, 58..77 rock & battle,
@@ -164,6 +167,7 @@ static const ScaleDef kScales[kNumScales] = {
     {"Dorian",     "дорийский",        7, {0, 2, 3, 5, 7, 9, 10}, {0, 2, 3, 5, 7, 9, 10}},
     {"Harm Minor", "гармонический минор", 7, {0, 2, 3, 5, 7, 8, 11}, {0, 2, 3, 5, 7, 8, 11}},
 };
+static const char* const kQualityNames[3] = { "AUTO", "ECO", "HIGH" };
 static constexpr int kNumChordModes = 6;
 static const char* const kChordModeNames[kNumChordModes] = { "OFF", "TRIAD", "7TH", "9TH", "POWER", "SUS4" };
 

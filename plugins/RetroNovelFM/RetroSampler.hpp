@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include "RetroData.hpp"
+#include "RetroFast.hpp"
 #include "samples/SampleIndex.hpp"
 #include "samples/DrumKitIndex.hpp"
 
@@ -225,19 +226,25 @@ public:
         for (int k = 0; k < kNumUser; ++k) userRoot[k] = 60;
     }
 
-    void setSampleRate(double sr) { srate = sr; for (auto& v : voices) v.active = false; }
+    void setSampleRate(double sr) {
+        srate = sr; for (auto& v : voices) v.active = false;
+        static const double F[3] = { 760, 1180, 2650 };
+        for (int k = 0; k < 3; ++k) choirFc[k] = 2 * std::sin(3.14159265 * std::min(F[k], sr * 0.24) / sr);
+    }
     void setRelease(float r) { relMul = r; }
     void setBrightness(float b) { bright = std::pow(2.0f, (b - 1.f) * 2.f); }
+    void setEco(bool e) { voiceCap = e ? 18 : NV; }
+    void panic() { for (auto& v : voices) { v.active = false; std::memset(v.lp, 0, sizeof(v.lp)); std::memset(v.cab, 0, sizeof(v.cab)); v.pre = 0; } std::fill(ks.begin(), ks.end(), 0.f); }
     void setUser(int k, UserSample* s) { user[k].store(s); }
     void setUserRoot(int k, int n) { userRoot[k] = n; }
 
     void noteOn(int inst, int note, int vel, double transpose, float gainMul = 1.f) {
         Voice* best = nullptr;
-        for (auto& v : voices) if (!v.active) { best = &v; break; }
+        for (int i = 0; i < voiceCap; ++i) if (!voices[i].active) { best = &voices[i]; break; }
         if (!best) {
             // steal the quietest voice (released tails first) instead of the oldest: no audible cut
             float bl = 1e9f;
-            for (auto& v : voices) { const float l = v.env * v.amp * (v.released ? 0.3f : 1.f); if (l < bl) { bl = l; best = &v; } }
+            for (int i = 0; i < voiceCap; ++i) { Voice& v = voices[i]; const float l = v.env * v.amp * (v.released ? 0.3f : 1.f); if (l < bl) { bl = l; best = &v; } }
         }
         Voice& v = *best;
         v.inst = inst;
@@ -375,7 +382,7 @@ public:
             if (v.stage == 2 && D.s <= 0 && v.env < 0.0001f) { v.active = false; continue; }
 
             double pm = pmul;
-            if (D.vib > 0) { v.vph += 5.2 / srate; if (v.vph >= 1) v.vph -= 1; pm *= std::pow(2.0, std::sin(6.2831853 * v.vph) * D.vib / 1200.0); }
+            if (D.vib > 0) { v.vph += 5.2 / srate; if (v.vph >= 1) v.vph -= 1; pm *= fexp2(fsin1(v.vph) * D.vib / 1200.0); }
 
             float l = 0, r = 0;
             if (v.src == srcSample) {
@@ -400,28 +407,28 @@ public:
                     if (D.mute > 0.f) { v.pre += (x - v.pre) * 0.12f; x = v.pre * 1.7f; }
                     v.cab[0] += (x - v.cab[0]) * 0.008f; x -= v.cab[0];
                     if (D.drive > 1.f) {
-                        x = std::tanh(x * D.drive * 1.5f + 0.12f) - 0.1194f;
+                        x = ftanh(x * D.drive * 1.5f + 0.12f) - 0.1194f;
                         v.cab[1] += (x - v.cab[1]) * 0.42f; v.cab[2] += (v.cab[1] - v.cab[2]) * 0.42f;
                         v.cab[3] += (v.cab[2] - v.cab[3]) * 0.02f;           // tame boom
                         x = (v.cab[2] - v.cab[3] * 0.35f) * 0.85f;
-                    } else x = std::tanh(x * (0.8f + D.drive)) * 0.95f;
+                    } else x = ftanh(x * (0.8f + D.drive)) * 0.95f;
                     l = r = x;
                 }
             } else if (v.src == srcChoir) {
                 const double f = v.freq * pm;
                 double saw = 0;
                 for (int k = 0; k < 3; ++k) {
-                    const double det = std::pow(2.0, (k - 1) * v.cdet / 1200.0);
+                    const double det = fexp2((k - 1) * v.cdet / 1200.0);
                     v.ph[k] += f * det / srate; if (v.ph[k] >= 1) v.ph[k] -= 1;
                     saw += (v.ph[k] * 2 - 1);
                 }
                 rng = rng * 1664525u + 1013904223u;
                 const double nz = ((rng >> 8) / 8388608.0 - 1.0) * 0.08;
                 const double in = saw / 3.0 + nz;
-                static const double F[3] = { 760, 1180, 2650 }, G[3] = { 1.0, 0.55, 0.18 };
+                static const double G[3] = { 1.0, 0.55, 0.18 };
                 double o = 0;
                 for (int k = 0; k < 3; ++k) {
-                    const double fc = 2 * std::sin(3.14159265 * std::min(F[k], srate * 0.24) / srate);
+                    const double fc = choirFc[k];
                     double& lo = v.fs[k][0]; double& bp = v.fs[k][1];
                     const double hp = in - lo - 0.12 * bp;
                     bp += fc * hp; lo += fc * bp;
@@ -440,7 +447,7 @@ public:
                     const int i0 = v.sPos[k], i1 = (i0 + 1) % N;
                     const float y = buf[i0] * (1 - fr) + buf[i1] * fr;
                     float nv = (y + v.sPrev[k]) * 0.5f * damp;
-                    if (D.sustain > 0 && !v.released) nv += std::tanh(y * 3.f) * 0.0009f * D.sustain;   // feedback keeps the lead singing
+                    if (D.sustain > 0 && !v.released) nv += ftanh(y * 3.f) * 0.0009f * D.sustain;   // feedback keeps the lead singing
                     v.sPrev[k] = y; buf[i0] = nv;
                     v.sPos[k] = (i0 + 1) % N;
                     sum += y;
@@ -449,28 +456,28 @@ public:
                 v.cab[0] += (sum - v.cab[0]) * 0.012f;          // DC / low cut
                 float xg = sum - v.cab[0];
                 if (D.drive > 1.f) {
-                    xg = std::tanh(xg * D.drive * 1.6f + 0.15f) - std::tanh(0.15f);
+                    xg = ftanh(xg * D.drive * 1.6f + 0.15f) - 0.14888503f;
                     v.cab[1] += (xg - v.cab[1]) * 0.33f; v.cab[2] += (v.cab[1] - v.cab[2]) * 0.33f; // cabinet
                     xg = v.cab[2] * 0.9f;
-                } else if (D.drive > 0.f) xg = std::tanh(xg * (0.6f + D.drive)) * 0.9f;
+                } else if (D.drive > 0.f) xg = ftanh(xg * (0.6f + D.drive)) * 0.9f;
                 if (v.src == srcBassGtr) xg *= 1.3f;
                 l = r = xg;
                 (void)pm;
             } else if (v.src == srcOrgan) {
                 static const double ratio[6] = { 0.5, 1, 1.5, 2, 3, 4 }, g[6] = { 0.7, 1.0, 0.5, 0.65, 0.4, 0.3 };
                 double o = 0;
-                for (int k = 0; k < 6; ++k) { v.oph[k] += v.freq * pm * ratio[k] / srate; if (v.oph[k] >= 1) v.oph[k] -= 1; o += std::sin(6.2831853 * v.oph[k]) * g[k]; }
+                for (int k = 0; k < 6; ++k) { v.oph[k] += v.freq * pm * ratio[k] / srate; if (v.oph[k] >= 1) v.oph[k] -= 1; o += fsin1(v.oph[k]) * g[k]; }
                 v.t += 1.0 / srate;
                 if (v.t < 0.006) { rng = rng * 1664525u + 1013904223u; o += ((rng >> 8) / 8388608.0 - 1.0) * 0.6 * (1 - v.t / 0.006); }   // key click
-                const float dr = (float)std::tanh(o * 0.35 * D.drive) / (float)std::tanh(0.35 * D.drive);
+                const float dr = ftanh((float)(o * 0.35 * D.drive)) / ftanh((float)(0.35 * D.drive));
                 v.oph[6] += 6.3 / srate; if (v.oph[6] >= 1) v.oph[6] -= 1;                       // rotary speaker
-                const float rot = (float)std::sin(6.2831853 * v.oph[6]);
+                const float rot = fsin1(v.oph[6]);
                 l = dr * (0.8f + 0.2f * rot); r = dr * (0.8f - 0.2f * rot);
             } else if (v.src == srcSaw || v.src == srcSquare) {
                 const int nv = v.src == srcSquare ? 1 : (D.detune > 15 ? 5 : 3);
                 double o = 0;
                 for (int k = 0; k < nv; ++k) {
-                    const double det = nv == 1 ? 1.0 : std::pow(2.0, ((k - (nv - 1) * 0.5) / ((nv - 1) * 0.5)) * D.detune / 1200.0);
+                    const double det = nv == 1 ? 1.0 : fexp2(((k - (nv - 1) * 0.5) / ((nv - 1) * 0.5)) * D.detune / 1200.0);
                     const double dt = v.freq * pm * det / srate;
                     v.oph[k] += dt; if (v.oph[k] >= 1) v.oph[k] -= 1;
                     const double p = v.oph[k];
@@ -485,11 +492,11 @@ public:
                 // music box tine: inharmonic partials, fast decay of the overtones, a little spring "wow"
                 v.t += 1.0 / srate;
                 static const double pr[4] = { 1.0, 2.0, 5.40, 8.93 }, pg[4] = { 1.0, 0.22, 0.32, 0.14 }, pd[4] = { 2.2, 0.6, 0.22, 0.09 };
-                const double wow = 1.0 + 0.0035 * std::sin(6.2831853 * 0.45 * v.t + v.oph[6] * 6.0);
+                const double wow = 1.0 + 0.0035 * fsin1(0.45 * v.t + v.oph[6] * 0.95493);
                 double o = 0;
                 for (int k = 0; k < 4; ++k) {
                     v.oph[k] += v.freq * pm * wow * pr[k] / srate; if (v.oph[k] >= 1) v.oph[k] -= 1;
-                    o += std::sin(6.2831853 * v.oph[k]) * pg[k] * std::exp(-v.t / pd[k]);
+                    o += fsin1(v.oph[k]) * pg[k] * fexp(-v.t / pd[k]);
                 }
                 if (v.t < 0.004) { rng = rng * 1664525u + 1013904223u; o += ((rng >> 8) / 8388608.0 - 1.0) * 0.35 * (1 - v.t / 0.004); }   // comb pin click
                 l = r = (float)(o * 0.75);
@@ -498,23 +505,23 @@ public:
                 v.t += 1.0 / srate;
                 static const double pr[5] = { 1.0, 2.41, 3.87, 5.31, 7.02 }, pg[5] = { 1.0, 0.6, 0.45, 0.3, 0.2 };
                 const double hitT = std::fmod(v.t, 1.0 / 18.0);
-                const double strike = v.released ? 0.0 : std::exp(-hitT / 0.012);
+                const double strike = v.released ? 0.0 : fexp(-hitT / 0.012);
                 v.oph[5] += (strike - v.oph[5]) * 0.0004;                     // ring builds up
                 double o = 0;
                 for (int k = 0; k < 5; ++k) {
                     v.oph[k] += v.freq * pm * pr[k] / srate; if (v.oph[k] >= 1) v.oph[k] -= 1;
-                    o += std::sin(6.2831853 * v.oph[k]) * pg[k];
+                    o += fsin1(v.oph[k]) * pg[k];
                 }
                 const double amp = std::min(1.0, v.oph[5] * 2.6 + 0.4 * strike);
-                l = r = (float)std::tanh(o * amp * 0.6);
+                l = r = ftanh((float)(o * amp * 0.6));
             } else if (v.src == srcDrum) {
                 v.t += 1.0 / srate;
-                const double f = v.freq * (1.0 + 1.6 * std::exp(-v.t / 0.035));
+                const double f = v.freq * (1.0 + 1.6 * fexp(-v.t / 0.035));
                 v.oph[0] += f / srate; if (v.oph[0] >= 1) v.oph[0] -= 1;
                 rng = rng * 1664525u + 1013904223u;
-                const double nz = ((rng >> 8) / 8388608.0 - 1.0) * std::exp(-v.t / 0.018);
-                const double o = std::sin(6.2831853 * v.oph[0]) + nz * 0.5;
-                l = r = (float)(std::tanh(o * (1.0 + D.drive)) * 0.9);
+                const double nz = ((rng >> 8) / 8388608.0 - 1.0) * fexp(-v.t / 0.018);
+                const double o = fsin1(v.oph[0]) + nz * 0.5;
+                l = r = (float)(ftanh(o * (1.0 + D.drive)) * 0.9);
             } else {
                 float* buf = &ks[(&v - voices) * KS];
                 const int N = (int)v.ksLen;
@@ -596,7 +603,8 @@ private:
     std::vector<float> ks;
     std::atomic<UserSample*> user[kNumUser];
     int userRoot[kNumUser];
-    double srate = 44100;
+    int voiceCap = NV;
+    double srate = 44100, choirFc[3] = {0.1, 0.16, 0.36};
     float relMul = 1, bright = 1;
     uint32_t serial = 0, rng = 0x2468ace1u;
 
