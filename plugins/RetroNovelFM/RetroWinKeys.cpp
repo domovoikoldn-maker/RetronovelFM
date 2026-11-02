@@ -4,8 +4,6 @@
 // the user currently has active in the host window (Russian, Ukrainian, ...).
 #include <cstdint>
 
-namespace retrofm {
-
 #ifdef _WIN32
 # ifndef NOMINMAX
 #  define NOMINMAX
@@ -14,6 +12,11 @@ namespace retrofm {
 #  define WIN32_LEAN_AND_MEAN
 # endif
 # include <windows.h>
+#endif
+
+namespace retrofm {
+
+#ifdef _WIN32
 
 static HKL activeLayout()
 {
