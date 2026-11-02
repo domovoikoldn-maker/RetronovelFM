@@ -41,6 +41,9 @@ extern const uint8_t kSmp_ebass[];
 extern const uint8_t kSmp_etoms[];
 extern const uint8_t kSmp_taiko[];
 extern const uint8_t kSmp_timp[];
+extern const uint8_t kSmp_xylo[];
+extern const uint8_t kSmp_tbell[];
+extern const uint8_t kSmp_cymrev[];
 extern const uint8_t kSmp_drums[];
 
 static const SampleZone kZ_piano[] = {
@@ -336,6 +339,32 @@ static const SampleZone kZ_timp[] = {
     {280850, 41552, 0, 0, 24000, 53, 0.4309f},
     {322402, 57487, 0, 0, 24000, 65, 0.3186f},
 };
+static const SampleZone kZ_xylo[] = {
+    {0, 38248, 0, 0, 32000, 55, 0.7760f},
+    {38248, 38506, 0, 0, 32000, 60, 0.9166f},
+    {76754, 35809, 0, 0, 32000, 67, 0.7234f},
+    {112563, 31104, 0, 0, 32000, 72, 1.0000f},
+    {143667, 19165, 0, 0, 32000, 79, 0.7460f},
+    {162832, 15161, 0, 0, 32000, 84, 0.7376f},
+    {177993, 13520, 0, 0, 32000, 91, 0.7500f},
+    {191513, 12963, 0, 0, 32000, 96, 0.7640f},
+};
+static const SampleZone kZ_tbell[] = {
+    {0, 105816, 0, 0, 24000, 60, 0.3664f},
+    {105816, 104911, 0, 0, 24000, 62, 0.6787f},
+    {210727, 104294, 0, 0, 24000, 64, 0.5012f},
+    {315021, 104382, 0, 0, 24000, 65, 0.9472f},
+    {419403, 104008, 0, 0, 24000, 67, 0.7362f},
+    {523411, 103946, 0, 0, 24000, 69, 0.7838f},
+    {627357, 104901, 0, 0, 24000, 71, 0.8744f},
+    {732258, 105073, 0, 0, 24000, 72, 0.7264f},
+    {837331, 104708, 0, 0, 24000, 74, 1.0000f},
+    {942039, 103272, 0, 0, 24000, 76, 0.6190f},
+    {1045311, 103468, 0, 0, 24000, 77, 0.5546f},
+};
+static const SampleZone kZ_cymrev[] = {
+    {0, 75108, 0, 0, 24000, 60, 1.0000f},
+};
 
 static const SampleSet kSampleSets[] = {
     {"piano", kSmp_piano, kZ_piano, 15},
@@ -372,8 +401,11 @@ static const SampleSet kSampleSets[] = {
     {"etoms", kSmp_etoms, kZ_etoms, 4},
     {"taiko", kSmp_taiko, kZ_taiko, 2},
     {"timp", kSmp_timp, kZ_timp, 8},
+    {"xylo", kSmp_xylo, kZ_xylo, 8},
+    {"tbell", kSmp_tbell, kZ_tbell, 11},
+    {"cymrev", kSmp_cymrev, kZ_cymrev, 1},
 };
-static const int kSampleSetCount = 34;
+static const int kSampleSetCount = 37;
 
 // live kit, lane order = DrumLane
 static const SampleZone kDrumZones[9] = {

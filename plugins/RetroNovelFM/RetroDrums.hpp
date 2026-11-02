@@ -1,5 +1,6 @@
 // RetroDrums.hpp - synthesized drum kit + step sequencer synced to host tempo
 #pragma once
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include "RetroData.hpp"
@@ -196,12 +197,11 @@ private:
 // Step sequencer: 16th-note steps, follows host position (or free-runs)
 class DrumSequencer {
 public:
+    DrumSequencer() { effectivePattern(kPatterns[0].lane, kPatterns[0].len, 0, 0.f, 0, defPat); }
     void setSampleRate(double sr) { srate = sr; resync = true; }
-    void setPattern(int p) {
-        p = p < 0 ? 0 : (p > kNumPatterns - 1 ? kNumPatterns - 1 : p);
-        if (p != pat) { pat = p; resync = true; }
-    }
-    void setTable(const DrumPattern* t) { table = t; }
+    // the pattern adapted to the current meter (owned by the engine, swapped atomically)
+    void setPattern(const EffPattern* e) { if (e != eff.load()) { eff.store(e); resync = true; } }
+    void setGroove(float swingKnob, float humanize) { swingK = swingKnob; human = humanize; }
 
     // called once per block before ticking
     // mode: 0 off, 1 sync to host, 2 always
@@ -224,53 +224,91 @@ public:
     void tick(DrumSynth& d, bool fills) {
         if (!running) return;
         pos += stepsPerSample;
-        const DrumPattern& P = table[pat];
+        const EffPattern& P = *eff.load();
         if (resync) resyncNext();
-        while (trigTime(next, P) <= pos) {
+        int guard = 0;
+        while (trigTime(next, P) <= pos && guard++ < 8) {
             fire(d, next, P, fills);
             ++next;
         }
     }
 
     int currentStep() const { return running ? lastStep : -1; }
+    bool isRunning() const { return running; }
+    bool isFree() const { return free; }
+    double position() const { return pos; }
 
 private:
-    // a step is a 16th note, or an 8th-note triplet for shuffle / jazz patterns (pos is in 16ths)
-    static double stepLen(const DrumPattern& P) { return P.triplet ? 4.0 / 3.0 : 1.0; }
-    static double trigTime(int64_t s, const DrumPattern& P) { return ((double)s + ((s & 1) ? P.swing : 0.0)) * stepLen(P); }
+    static double stepLen(const EffPattern& P) { return P.triplet ? 4.0 / 3.0 : 1.0; }
+    static double hash01(int64_t s, uint32_t salt) {
+        uint32_t x = (uint32_t)(s * 2654435761u) ^ salt; x ^= x >> 15; x *= 2246822519u; x ^= x >> 13; x *= 3266489917u; x ^= x >> 16;
+        return (x & 0xffffff) / 16777215.0;
+    }
+    double trigTime(int64_t s, const EffPattern& P) const {
+        const int len = P.len < 1 ? 16 : P.len;
+        const int st = (int)(((s % len) + len) % len);
+        const double sw = std::max((double)P.swing, (double)swingK * 0.5);
+        double off = 0;
+        if (P.swingMask[st] == 1) off = sw;
+        else if (P.swingMask[st] == 2) off = sw * 2.0;
+        double t = ((double)s + off) * stepLen(P);
+        if (human > 0) {
+            // up to +-18 ms, never more than a third of a step
+            const double ms = (hash01(s, 0x9e37u) * 2.0 - 1.0) * 18.0 * human;
+            double d = ms * 0.001 * stepsPerSample * srate;
+            d = std::max(-0.33, std::min(0.33, d));
+            t += d;
+        }
+        return t;
+    }
     void resyncNext() {
-        const DrumPattern& P = table[pat];
+        const EffPattern& P = *eff.load();
         next = (int64_t)std::ceil(pos / stepLen(P) - 0.5);
         if (next < 0) next = 0;
+        while (next > 0 && trigTime(next - 1, P) >= pos - 1e-9) --next;
         while (trigTime(next, P) < pos - 1e-9) ++next;
-        // keep the bar aligned: step numbers count from the start of the song in this grid
         resync = false;
     }
-    void fire(DrumSynth& d, int64_t s, const DrumPattern& P, bool fills) {
+    float humanVel(int64_t s, int lane) const {
+        if (human <= 0) return 1.f;
+        const double db = (hash01(s * 16 + lane, 0x51edu) * 2.0 - 1.0) * 3.0 * human;
+        return (float)std::pow(10.0, db / 20.0);
+    }
+    void fire(DrumSynth& d, int64_t s, const EffPattern& P, bool fills) {
         const int len = P.len < 1 ? 16 : P.len;
         const int64_t bar = s / len;
         const int st = (int)(s % len);
         lastStep = st;
-        const bool fillBar = fills && (bar % 4 == 3) && st >= len - 4;
+        const int fl = std::max(3, std::min(6, P.fillLen));
+        const bool fillBar = fills && (bar % 4 == 3) && st >= len - fl;
         for (int lane = 0; lane < kDrumLanes; ++lane) {
             if (fillBar && lane != dKick && lane != dCrash) continue;
             const float v = stepVel(P.lane[lane][st]);
-            if (v > 0) d.trigger(lane, v);
+            if (v > 0) d.trigger(lane, std::min(1.f, v * humanVel(s, lane)));
         }
         if (fillBar) {
-            const int k = st - (len - 4);
-            static const int fl[4] = { dSnare, dSnare, dTomH, dTomL };
-            static const float fv[4] = { 1.0f, 0.75f, 1.0f, 1.0f };
-            d.trigger(fl[k], fv[k]);
-            if (k == 1) d.trigger(dTomH, 0.5f);
+            const int k = st - (len - fl);
+            // fills per beat size: 3 (triplet), 4 (straight), 6 (compound)
+            static const int f3[3] = { dSnare, dTomH, dTomL };
+            static const int f4[4] = { dSnare, dSnare, dTomH, dTomL };
+            static const int f6[6] = { dSnare, -1, dSnare, dTomH, dTomH, dTomL };
+            static const float v6[6] = { 1.0f, 0, 0.8f, 1.0f, 0.7f, 1.0f };
+            int ln = -1; float vv = 1.f;
+            if (fl == 3) ln = f3[k];
+            else if (fl == 4) { ln = f4[k]; vv = k == 1 ? 0.75f : 1.0f; if (k == 1) d.trigger(dTomH, 0.5f); }
+            else if (fl == 6) { ln = f6[k]; vv = v6[k]; }
+            else ln = k < fl - 2 ? dSnare : (k == fl - 2 ? dTomH : dTomL);
+            if (ln >= 0) d.trigger(ln, vv * humanVel(s, ln));
         }
         if (fills && st == 0 && bar > 0 && bar % 4 == 0) d.trigger(dCrash, 0.9f);
     }
 
     double srate = 44100, pos = 0, stepsPerSample = 0;
     int64_t next = 0;
-    const DrumPattern* table = kPatterns;
-    int pat = 0, mode = 0, lastStep = -1;
+    EffPattern defPat;
+    std::atomic<const EffPattern*> eff { &defPat };
+    float swingK = 0, human = 0;
+    int mode = 0, lastStep = -1;
     bool running = false, free = false, resync = true;
 };
 

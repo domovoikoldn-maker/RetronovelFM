@@ -7,7 +7,7 @@ namespace retrofm {
 enum HairStyle { hsLong, hsTwintails, hsHime, hsWavy, hsPonytail, hsBob, hsBraids, hsBun, hsSideTail, hsBoyShort, hsBoySpiky };
 enum Accessory { acRibbon, acBell, acNone, acSnow, acScrunchie, acHeadphones, acGlasses, acKanzashi, acHeaddress, acHeadset };
 enum Outfit    { ofSailor, ofBlazer, ofSweater, ofHoodie, ofVest, ofKimono, ofGothic, ofIdolDress, ofIdolJacket };
-enum Celestial { ceSun, ceSunset, ceMoon, ceCloudy, ceRedMoon };
+enum Celestial { ceSun, ceSunset, ceMoon, ceCloudy, ceRedMoon, ceNeon };
 enum Particle  { ptSakura, ptSnow, ptMaple, ptLeaf, ptSparkle };
 
 struct CharacterDef {
@@ -23,7 +23,7 @@ struct CharacterDef {
     int male;   // 0 = girl, 1 = boy
 };
 
-static constexpr int kNumChars = 9;
+static constexpr int kNumChars = 12;
 static const CharacterDef kChars[kNumChars] = {
     // Hikari - keys
     {"Хикари", "клавишные",
@@ -70,6 +70,22 @@ static const CharacterDef kChars[kNumChars] = {
      0x3a2448, 0x140a1c, 0x8a6aa8, 0xd8203a, 0x560010,
      0x1c1620, 0xf2eef4, 0xb0102a, hsLong, acHeaddress, ofGothic,
      0x0b0610, 0x3a1020, 0x24101c, ceRedMoon, ptSakura, 0x8a1028, 0xd83a5a},
+    // ---- REIWA (2020s): neon city
+    // Mirai - future bass, kawaii leads, plucks
+    {"Мирай", "future bass и каваи-лиды",
+     0xffb0e0, 0xd05aa8, 0xfff0fa, 0x3ad8ff, 0x0a4a8a,
+     0xf8f4ff, 0x6a5aff, 0xff5fc8, hsTwintails, acHeadphones, ofHoodie,
+     0x1a0a3a, 0xff6ab0, 0x7a2a8a, ceNeon, ptSparkle, 0xffe0f4, 0xff4fbf},
+    // Ame - lo-fi, city pop, synthwave
+    {"Амэ", "lo-fi и city pop",
+     0x4a5a9a, 0x1e2448, 0x9aa8e8, 0xb07cff, 0x3a1a7a,
+     0x2a2a3c, 0xf0e8ff, 0x46d0ff, hsBob, acGlasses, ofSweater,
+     0x0c0a2a, 0x5a3aa0, 0x2a2060, ceNeon, ptSparkle, 0xc0e8ff, 0x46d0ff},
+    // Kira - basses, phonk, hyperpop
+    {"Кира", "808, фонк и басы",
+     0xe8e8f4, 0x8a8aa8, 0xffffff, 0xff3a6a, 0x6a0a2a,
+     0x16161e, 0xff3a6a, 0xc8ff3a, hsSideTail, acHeadphones, ofHoodie,
+     0x08060f, 0x3a0a3a, 0x1a0a2a, ceNeon, ptSparkle, 0xd0ff60, 0xb8ff2a},
 };
 
 // ------------------------------------------------------------------ vocal idols (original characters)
@@ -185,6 +201,39 @@ static const InstrumentFlavor kFlavor[kNumInstruments] = {
     {8, "Боевой хор. Последняя форма босса."},
     {7, "Эпические томы — для марша целой армии."},
     {1, "Квадратная волна — звук восьмибитных приключений!"},
+    // ---- 2000s extras: horror & school
+    {8, "Шкатулка из заброшенной школы. Пружина устала, ноты плывут... но она всё играет."},
+    {8, "Обратная тарелка: шшшШШШ — и сразу удар. Скример готов."},
+    {8, "Расстроенный пэд. Что-то здесь не так... совсем не так."},
+    {1, "Дин-дон-дан-дон! Звонок на урок — как в каждой японской школе."},
+    {1, "Электрический звонок! Держи клавишу, пока не закончится перемена."},
+    {0, "Старое пианино из музыкального класса. Чуть расстроено, зато какое тёплое."},
+    {1, "Ксилофон! Тук-тук по деревянным пластинкам — весёлая сцена!"},
+    // ---- REIWA (2020s)
+    {9, "Future bass! Зажми аккорд — он задышит в такт бочке."},
+    {9, "Каваи-лид: короткий «чирик» в начале каждой ноты. Мне идёт, правда?"},
+    {9, "Future pluck — звонкие щипки для припевов современных опенингов."},
+    {9, "Кристальный плак. Звук гача-крутки, когда выпадает редкая героиня!"},
+    {9, "Колокольный пэд для меню и экранов загрузки."},
+    {10, "City Pop EP. Ночной Токио из окна такси, восьмидесятые возвращаются."},
+    {10, "Lo-fi клавиши: плёнка чуть плывёт, за окном дождь. Учимся под это?"},
+    {10, "Вейпор-пэд. Медленный, мечтательный, как закат в торговом центре."},
+    {9, "Мерцающий пэд — звёздное небо в финальной сцене."},
+    {10, "Синтвейв-лид! Неоновая трасса, едем навстречу рассвету."},
+    {10, "Синтвейв-пэд: медный звук аналоговых синтезаторов."},
+    {11, "Хайперпоп: громко, ярко, с хрустом. Правил нет!"},
+    {9, "Суперсо-лид — главный голос евробита и трансовых опенингов."},
+    {11, "Гувер из J-core! Ныряющий звук для безумных ритм-игр."},
+    {9, "Вокальный чоп: «а», «о», «э» на каждую ноту — как в современных треках."},
+    {11, "Вобл-бас качается в темп песни. Сделай погромче!"},
+    {11, "Риз-бас: два расстроенных пилообразных — и всё вибрирует."},
+    {11, "808 с глайдом: накладывай ноты друг на друга — бас будет скользить."},
+    {10, "Слэп-бас для фанка и city pop. Щёлк!"},
+    {11, "Acid 303! Сильнее нажмёшь — громче квакнет фильтр."},
+    {11, "Фонк-ковбелл. Дрифт, ночь, тонированные стёкла."},
+    {10, "Фанк-гитара с вау-педалью: ва-ва, как в аниме про город."},
+    {7, "Эрху — двухструнная скрипка. Звук фэнтези-RPG с восточными мотивами."},
+    {7, "Сямисэн с жужжащим «савари». Традиции и современные игры вместе!"},
 };
 
 } // namespace retrofm

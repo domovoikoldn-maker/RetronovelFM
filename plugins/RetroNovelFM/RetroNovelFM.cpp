@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <string>
 
 START_NAMESPACE_DISTRHO
 
@@ -12,7 +13,7 @@ class RetroNovelFM : public Plugin
 {
 public:
     RetroNovelFM()
-        : Plugin(retrofm::kParamCount, 0, 13),
+        : Plugin(retrofm::kParamCount, 0, 17),
           engine(new retrofm::Engine())
     {
         engine->setSampleRate(getSampleRate());
@@ -23,7 +24,7 @@ protected:
     const char* getDescription() const override { return "FM synth + drum machine in the style of PC-98 / 90s visual novels and RPG Maker music"; }
     const char* getMaker() const override { return "RetroNovel"; }
     const char* getLicense() const override { return "ISC"; }
-    uint32_t getVersion() const override { return d_version(7, 0, 0); }
+    uint32_t getVersion() const override { return d_version(8, 0, 0); }
 
     static void setEnum(Parameter& p, const char* const* names, int count)
     {
@@ -70,6 +71,24 @@ protected:
             setEnum(p, names, retrofm::kNumPatterns);
             break;
         }
+        case retrofm::pMeter:
+        {
+            const char* names[retrofm::kNumMeters];
+            for (int i = 0; i < retrofm::kNumMeters; ++i) names[i] = retrofm::kMeters[i].name;
+            setEnum(p, names, retrofm::kNumMeters);
+            break;
+        }
+        case retrofm::pKey:   setEnum(p, retrofm::kKeyNames, 12); break;
+        case retrofm::pChord: setEnum(p, retrofm::kChordModeNames, retrofm::kNumChordModes); break;
+        case retrofm::pScale:
+        {
+            const char* names[retrofm::kNumScales];
+            for (int i = 0; i < retrofm::kNumScales; ++i) names[i] = retrofm::kScales[i].name;
+            setEnum(p, names, retrofm::kNumScales);
+            break;
+        }
+        case retrofm::pScaleLock:
+        case retrofm::pSongPlay:
         case retrofm::pDrumFill:
         case retrofm::pVocalMode:
             p.hints |= kParameterIsBoolean;
@@ -121,6 +140,13 @@ protected:
             st.key = "lyrics"; st.defaultValue = retrofm::kLyricPresets[0][1]; st.hints = 0; st.label = "Lyrics";
             return;
         }
+        if (index >= 13)
+        {
+            static const char* const keys[4] = { "song", "take", "slots", "lessons" };
+            static const char* const labels[4] = { "Random Song", "Recorded Take", "Preset Slots", "Lesson Progress" };
+            st.key = keys[index - 13]; st.defaultValue = ""; st.hints = 0; st.label = labels[index - 13];
+            return;
+        }
         const int k = (int)(index % 4) + 1;
         char key[16];
         if (index < 4)
@@ -147,6 +173,10 @@ protected:
     {
         if (key && value && !std::strcmp(key, "lyrics")) { engine->setLyrics(value); return; }
         if (key && !std::strcmp(key, "rewind")) { engine->rewindLyrics(); return; }
+        if (key && value && !std::strcmp(key, "song")) { engine->setSong(value); return; }
+        if (key && value && !std::strcmp(key, "take")) { if (!*value) engine->recorder().clear(); else engine->recorder().deserialize(value); return; }
+        if (key && value && !std::strcmp(key, "slots")) { slots = value; return; }
+        if (key && value && !std::strcmp(key, "lessons")) { lessons = value; return; }
         if (!key || !value || std::strlen(key) < 4) return;
         const int k = key[std::strlen(key) - 1] - '1';
         if (k < 0 || k > 3) return;
@@ -158,6 +188,10 @@ protected:
     String getState(const char* key) const override
     {
         if (key && !std::strcmp(key, "lyrics")) return String(engine->getLyrics().c_str());
+        if (key && !std::strcmp(key, "song")) return String(engine->getSong().c_str());
+        if (key && !std::strcmp(key, "take")) return String(engine->recorder().serialize(engine->tempo()).c_str());
+        if (key && !std::strcmp(key, "slots")) return String(slots.c_str());
+        if (key && !std::strcmp(key, "lessons")) return String(lessons.c_str());
         if (!key || std::strlen(key) < 4) return String();
         const int k = key[std::strlen(key) - 1] - '1';
         if (k < 0 || k > 3) return String();
@@ -205,8 +239,10 @@ protected:
         if (pos < frames) engine->process(outL + pos, outR + pos, frames - pos);
     }
 
-private:
+public:
     std::unique_ptr<retrofm::Engine> engine;
+private:
+    std::string slots, lessons;
 
     DISTRHO_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RetroNovelFM)
 };
@@ -217,3 +253,21 @@ Plugin* createPlugin()
 }
 
 END_NAMESPACE_DISTRHO
+
+// ---- direct access for the UI (MIDI export of the recorded take)
+namespace retrofm {
+bool retroTakeSnapshot(void* plugin, std::vector<RecEvent>& out, double& bpm)
+{
+    if (!plugin) return false;
+    DISTRHO::RetroNovelFM* p = static_cast<DISTRHO::RetroNovelFM*>(static_cast<DISTRHO::Plugin*>(plugin));
+    p->engine->recorder().snapshot(out);
+    bpm = p->engine->tempo();
+    return true;
+}
+void retroTakeClear(void* plugin)
+{
+    if (!plugin) return;
+    DISTRHO::RetroNovelFM* p = static_cast<DISTRHO::RetroNovelFM*>(static_cast<DISTRHO::Plugin*>(plugin));
+    p->engine->recorder().clear();
+}
+}

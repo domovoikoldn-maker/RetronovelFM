@@ -89,7 +89,7 @@ struct UserSample {
 bool loadAudioFileMono(const char* path, std::vector<float>& out, double& rate);
 
 // ------------------------------------------------------------------ instrument definitions
-enum SrcType { srcSample, srcChoir, srcGuitar, srcDistGtr, srcBassGtr, srcOrgan, srcSaw, srcSquare, srcDrum };
+enum SrcType { srcSample, srcChoir, srcGuitar, srcDistGtr, srcBassGtr, srcOrgan, srcSaw, srcSquare, srcDrum, srcMBox, srcEBell };
 struct Layer { const char* set; int lo, hi; float gain, pitch; };
 struct XPInst {
     SrcType src;
@@ -110,6 +110,7 @@ struct XPInst {
     float sustain;          // lead guitar sustain (0..1)
     int rhythm;             // 8 or 16: retrigger held notes in tempo
     int arp;                // 1 = arpeggiate held notes
+    float revLen;           // reverse playback length in seconds (0 = 0.9 s)
 };
 
 #define L1(s)            {{s, 0, 127, 1, 0}, {nullptr,0,0,0,0}, {nullptr,0,0,0,0}}
@@ -186,11 +187,23 @@ static const XPInst kRock[kNumRock] = {
     {srcSample, L1("etoms"), 0.0f,  9,  1.0f, 0.60f, 20000, 0.3f,  0,   0, false, 0, 0, 0, 2.20f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Epic Toms
     {srcSquare,  NOL,    0.0f,  9,  1.0f, 0.08f, 20000, 0.0f,  0,  10, false, 0, 0, 0, 0.85f, 0.0f, 0, 0.0f, 0.0f, 0, 0},   // Chip Square
 };
+// 2000s extras: horror & school (inst 78..84)
+static const XPInst kXP2[kNumXP2] = {
+    // src        layers  a      d     s     r      cut    vc    det  vib  rev  crush rnd oct  level  drive chord mute sust rhythm arp revLen
+    {srcMBox,    NOL,    0.0f,  9,   1.0f, 0.60f,  9000, 0.3f,  0,   0, false, 0, 28, 0, 0.62f, 0.0f, 0, 0.0f, 0.0f, 0, 0, 0},     // Cursed Box
+    {srcSample, L1("cymrev"), 0.0f, 9, 1.0f, 0.15f, 20000, 0.2f, 0,  0, true,  0, 0, 0, 2.20f, 0.0f, 0, 0.0f, 0.0f, 0, 0, 3.0f},  // Reverse Cymbal
+    {srcSaw,     NOL,    1.2f,  9,   1.0f, 2.20f,  2200, 0.0f, 38,  18, false, 0, 22, 0, 0.70f, 0.0f, 0, 0.0f, 0.0f, 0, 0, 0},    // Detuned Pad
+    {srcSample, L1("tbell"), 0.0f, 9,  1.0f, 2.50f, 20000, 0.3f, 0,  0, false, 0, 0, 0, 1.10f, 0.0f, 0, 0.0f, 0.0f, 0, 0, 0},    // School Chime
+    {srcEBell,   NOL,    0.0f,  9,   1.0f, 0.35f, 20000, 0.0f,  0,   0, false, 0, 0, 0, 0.55f, 0.0f, 0, 0.0f, 0.0f, 0, 0, 0},     // School Bell (electric ringer)
+    {srcSample, L1("piano"), 0.002f, 9, 1.0f, 0.45f, 5200, 0.4f, 14, 0, false, 0, 22, 0, 1.15f, 0.0f, 0, 0.0f, 0.0f, 0, 0, 0},   // Class Piano (out of tune)
+    {srcSample, L1("xylo"), 0.0f,  9,  1.0f, 0.30f, 20000, 0.4f,  0,  0, false, 0, 0, 0, 1.20f, 0.0f, 0, 0.0f, 0.0f, 0, 0, 0},    // Xylophone
+};
 #undef L1
 #undef NOL
 
-static inline const XPInst& instDef(int inst) { return inst >= kFirstRock ? kRock[inst - kFirstRock] : kXP[inst - kFirstXP]; }
-static inline int defSlot(int inst) { return inst >= kFirstRock ? kNumXP + (inst - kFirstRock) : inst - kFirstXP; }
+static inline const XPInst& instDef(int inst) { return inst >= kFirstXP2 ? kXP2[inst - kFirstXP2] : (inst >= kFirstRock ? kRock[inst - kFirstRock] : kXP[inst - kFirstXP]); }
+static inline int defSlot(int inst) { return inst >= kFirstXP2 ? kNumXP + kNumRock + (inst - kFirstXP2) : (inst >= kFirstRock ? kNumXP + (inst - kFirstRock) : inst - kFirstXP); }
+static constexpr int kNumSampDefs = kNumXP + kNumRock + kNumXP2;
 
 static const XPInst kUserDef = {srcSample, {{nullptr,0,0,0,0},{nullptr,0,0,0,0},{nullptr,0,0,0,0}},
                                 0.002f, 9, 1, 0.25f, 20000, 0.0f, 0, 0, false, 0, 0, 0, 1.0f};
@@ -202,9 +215,9 @@ public:
     static constexpr int KS = 8192;   // Karplus-Strong buffer per voice
 
     Sampler() : bank(SampleBank::get()) {
-        for (int i = 0; i < kNumXP + kNumRock; ++i)
+        for (int i = 0; i < kNumSampDefs; ++i)
         {
-            const XPInst& D = i < kNumXP ? kXP[i] : kRock[i - kNumXP];
+            const XPInst& D = i < kNumXP ? kXP[i] : (i < kNumXP + kNumRock ? kRock[i - kNumXP] : kXP2[i - kNumXP - kNumRock]);
             for (int l = 0; l < 3; ++l) setIdx[i][l] = D.layer[l].set ? bank.find(D.layer[l].set) : -1;
         }
         ks.assign(NV * KS, 0.f);
@@ -260,6 +273,7 @@ public:
                         addPlay(v, z, n + L.pitch + rnd - I.detune / 200.0, 0, L.gain * 0.75f, -0.6f, I.reverse);
                         addPlay(v, z, n + L.pitch + rnd + I.detune / 200.0, 0, L.gain * 0.75f, 0.6f, I.reverse);
                     } else addPlay(v, z, n + L.pitch + rnd, 0, L.gain, 0.f, I.reverse);
+                    if (I.reverse && I.revLen > 0 && v.np > 0) v.play[v.np - 1].revStart = std::min((double)z->len - 2, (double)I.revLen * z->rate);
                     if (I.octLayer > 0) {
                         const Zone* zo = pick(setIdx[slot][l], n + L.pitch - 12);
                         if (zo) addPlay(v, zo, n + L.pitch - 12, 0, L.gain * I.octLayer, 0.f, I.reverse);
@@ -298,9 +312,10 @@ public:
                 v.ksDamp = I.mute > 0 ? 0.93f : (I.sustain > 0 ? 0.99985f : (I.src == srcBassGtr ? 0.9975f : 0.9992f));
                 std::memset(v.cab, 0, sizeof(v.cab));
                 v.freq = base;
-            } else if (I.src == srcOrgan || I.src == srcSaw || I.src == srcSquare || I.src == srcDrum) {
-                v.freq = 440.0 * std::pow(2.0, (n - 69) / 12.0);
+            } else if (I.src == srcOrgan || I.src == srcSaw || I.src == srcSquare || I.src == srcDrum || I.src == srcMBox || I.src == srcEBell) {
+                v.freq = 440.0 * std::pow(2.0, (n + rnd - 69) / 12.0);
                 for (int k = 0; k < 7; ++k) { rng = rng * 1664525u + 1013904223u; v.oph[k] = (rng >> 8) / 16777216.0; }
+                if (I.src == srcEBell) v.oph[5] = 0;
                 v.t = 0;
                 std::memset(v.cab, 0, sizeof(v.cab));
             } else {
@@ -460,6 +475,32 @@ public:
                     } else o += (2 * p - 1) - blep(p, dt);
                 }
                 l = r = (float)(o / std::sqrt((double)nv) * 0.6);
+            } else if (v.src == srcMBox) {
+                // music box tine: inharmonic partials, fast decay of the overtones, a little spring "wow"
+                v.t += 1.0 / srate;
+                static const double pr[4] = { 1.0, 2.0, 5.40, 8.93 }, pg[4] = { 1.0, 0.22, 0.32, 0.14 }, pd[4] = { 2.2, 0.6, 0.22, 0.09 };
+                const double wow = 1.0 + 0.0035 * std::sin(6.2831853 * 0.45 * v.t + v.oph[6] * 6.0);
+                double o = 0;
+                for (int k = 0; k < 4; ++k) {
+                    v.oph[k] += v.freq * pm * wow * pr[k] / srate; if (v.oph[k] >= 1) v.oph[k] -= 1;
+                    o += std::sin(6.2831853 * v.oph[k]) * pg[k] * std::exp(-v.t / pd[k]);
+                }
+                if (v.t < 0.004) { rng = rng * 1664525u + 1013904223u; o += ((rng >> 8) / 8388608.0 - 1.0) * 0.35 * (1 - v.t / 0.004); }   // comb pin click
+                l = r = (float)(o * 0.75);
+            } else if (v.src == srcEBell) {
+                // electric school bell: clapper hits a metal gong ~18 times a second while the key is held
+                v.t += 1.0 / srate;
+                static const double pr[5] = { 1.0, 2.41, 3.87, 5.31, 7.02 }, pg[5] = { 1.0, 0.6, 0.45, 0.3, 0.2 };
+                const double hitT = std::fmod(v.t, 1.0 / 18.0);
+                const double strike = v.released ? 0.0 : std::exp(-hitT / 0.012);
+                v.oph[5] += (strike - v.oph[5]) * 0.0004;                     // ring builds up
+                double o = 0;
+                for (int k = 0; k < 5; ++k) {
+                    v.oph[k] += v.freq * pm * pr[k] / srate; if (v.oph[k] >= 1) v.oph[k] -= 1;
+                    o += std::sin(6.2831853 * v.oph[k]) * pg[k];
+                }
+                const double amp = std::min(1.0, v.oph[5] * 2.6 + 0.4 * strike);
+                l = r = (float)std::tanh(o * amp * 0.6);
             } else if (v.src == srcDrum) {
                 v.t += 1.0 / srate;
                 const double f = v.freq * (1.0 + 1.6 * std::exp(-v.t / 0.035));
@@ -544,7 +585,7 @@ private:
     }
 
     const SampleBank& bank;
-    int setIdx[kNumXP + kNumRock][3];
+    int setIdx[kNumSampDefs][3];
     Voice voices[NV];
     std::vector<float> ks;
     std::atomic<UserSample*> user[kNumUser];

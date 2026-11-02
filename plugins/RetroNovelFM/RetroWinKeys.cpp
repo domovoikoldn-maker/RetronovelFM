@@ -100,3 +100,23 @@ bool winLayoutIsCyrillic() { return false; }
 #endif
 
 } // namespace retrofm
+
+// ---- UTF-8 file names (Windows needs the wide API for non-ASCII paths)
+#include <cstdio>
+#include <string>
+#ifdef _WIN32
+namespace retrofm {
+FILE* retroFopenUtf8(const char* path, const char* mode)
+{
+    if (!path) return nullptr;
+    wchar_t wp[1024], wm[16];
+    if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, wp, 1024)) return nullptr;
+    if (!MultiByteToWideChar(CP_UTF8, 0, mode, -1, wm, 16)) return nullptr;
+    return _wfopen(wp, wm);
+}
+}
+#else
+namespace retrofm {
+FILE* retroFopenUtf8(const char* path, const char* mode) { return path ? std::fopen(path, mode) : nullptr; }
+}
+#endif

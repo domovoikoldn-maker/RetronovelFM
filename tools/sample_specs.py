@@ -41,6 +41,10 @@ SPECS = [
   dict(key="etoms",    repo="karoryfer.big-rusty-drums", folder="Samples", rx=r"^tom_(22|18|15|14)/mallet/cl/t\d+_m_vl5_rr1\.flac$", spacing=0, rate=32000, maxlen=1.8, loop=False, rng=(0, 127), roots={"22": 36, "18": 41, "15": 46, "14": 50}),
   dict(key="taiko",    repo="vcsl", folder="Membranophones/Struck Membranophones/Bass Drum 2", rx=r"^bassdrum_hit_(ff|mf1)\.wav$", spacing=0, rate=24000, maxlen=2.2, loop=False, rng=(0, 127), roots={"ff": 36, "mf1": 30}),
   dict(key="timp",     repo="vcsl", folder="Membranophones/Struck Membranophones/Timpani 2/Hit", rx=r"^Timpani([1-8])A_hit_v3_rr1_main\.wav$", spacing=0, rate=24000, maxlen=2.5, loop=False, rng=(0, 127), detect=True, nonote=True),
+  # ---- v8: school + horror (CC0, VCSL)
+  dict(key="xylo",     repo="vcsl", folder="Idiophones/Struck Idiophones/Xylophone", rx=r"^Hard Mallets/Xylo_Hard_([A-G]#?\d)_ff_01_far\.wav$", spacing=0, rate=32000, maxlen=1.3, loop=False, rng=(0, 127)),
+  dict(key="tbell",    repo="vcsl", folder="Idiophones/Struck Idiophones/Tubular Bells 2", rx=r"^TB_hit_([A-G]#?\d)_v4_\d\.wav$", spacing=0, rate=24000, maxlen=4.5, loop=False, rng=(0, 127)),
+  dict(key="cymrev",   repo="vcsl", folder="Idiophones/Struck Idiophones/Suspended Cymbal 1", rx=r"^susCymb1_(hit_fff1)\.wav$", spacing=0, rate=24000, maxlen=3.2, loop=False, rng=(0, 127), roots={"hit_fff1": 60}),
 ]
 # drum hits for the "Live (2000s)" kit: lane -> (repo, path regex)
 DRUMS = [

@@ -4,6 +4,7 @@
 #include "RetroCharacters.hpp"
 #include "pixelart/PixelArt.hpp"
 #include "RetroVocal.hpp"
+#include "RetroTools.hpp"
 #include <vector>
 #include <chrono>
 #include <cmath>
@@ -38,17 +39,22 @@ struct Box {
     float x = 0, y = 0, w = 0, h = 0;
     bool hit(float px, float py) const { return px >= x && px < x + w && py >= y && py < y + h; }
 };
+static Box mkBox(float x, float y, float w, float h) { Box b; b.x = x; b.y = y; b.w = w; b.h = h; return b; }
 
 enum CtlType { ctSelect, ctKnob, ctToggle, ctAction, ctEraTab, ctLoad, ctClearSmp, ctRootDn, ctRootUp,
                ctEditOpen, ctEditClose, ctEditUser, ctEditLen, ctEditClear, ctEditCopy, ctCell,
                ctIdol, ctLyricPreset, ctLyricEdit, ctLyricRewind, ctLyricRU, ctLyricPaste,
                ctScenesOpen, ctSceneCard, ctSceneOff, ctScenesClose, ctStoryOpen, ctLesson, ctStoryMenuClose,
-               ctGenre, ctGenrePat, ctKitStep };
+               ctGenre, ctGenrePat, ctKitStep,
+               ctToolsOpen, ctToolsClose, ctHarmonyOpen, ctHarmonyClose, ctMeterOpen, ctMeterPick, ctSongGen, ctSongToggle,
+               ctVoiceType, ctXPPage, ctSavePreset, ctLoadPreset, ctExportPack, ctImportPack, ctMidiTake, ctMidiSong, ctClearTake,
+               ctSlot, ctSlotStore, ctHarmKey, ctHarmScale, ctHarmChord, ctHarmLock };
 // control groups: 0 = always, 1..3 = only on that era tab (FM / XP / user), 10 = drum editor overlay
-enum CtlGroup { gAlways = 0, gFM = 1, gXP = 2, gUser = 3, gEditor = 10, gVocal = 11, gInst = 12, gRock = 13, gScenes = 14, gStoryMenu = 15 };
+enum CtlGroup { gAlways = 0, gFM = 1, gXP = 2, gUser = 3, gEditor = 10, gVocal = 11, gInst = 12, gRock = 13, gScenes = 14, gStoryMenu = 15,
+                gReiwa = 16, gHarmony = 17, gTools = 18, gMeter = 19, gXP2 = 20, gXPTabs = 21 };
 enum ActionId { aPrev, aNext, aRandom };
 
-static constexpr int kNumLessons = 5;
+static constexpr int kNumLessons = 20;
 
 struct Control {
     CtlType type; int param; float value; Box b; const char* label; int group;
@@ -88,6 +94,13 @@ public:
         if (const char* e = std::getenv("RETRO_INST")) { const float v = (float)std::atoi(e); parameterChanged(pInstrument, v); setParameterValue(pInstrument, v); fSwitchT = -10; fTypeT = -10; }
         if (const char* e = std::getenv("RETRO_ACT")) fParams[pOutActivity] = (float)std::atof(e);
         if (std::getenv("RETRO_DRUMS")) { fParams[pDrumMode] = 1; fParams[pDrumPattern] = 4; fParams[pOutDrumStep] = 6; }
+        if (std::getenv("RETRO_TOOLS")) fToolsOpen = true;
+        if (std::getenv("RETRO_HARMONY")) { fHarmonyOpen = true; fParams[pKey] = 9; fParams[pScale] = 1; fParams[pChord] = 2; fParams[pScaleLock] = 1; }
+        if (std::getenv("RETRO_METER")) { fMeterOpen = true; fParams[pMeter] = 5; }
+        if (const char* e = std::getenv("RETRO_XPPAGE")) fXPPage = std::atoi(e);
+        if (const char* e = std::getenv("RETRO_STATUS")) { fStatus = e; fStatusT = 0; }
+        if (const char* e = std::getenv("RETRO_METERV")) fParams[pMeter] = (float)std::atoi(e);
+        if (std::getenv("RETRO_SLOTS")) { fSlots[0] = currentPreset(); fSlots[0].name = "Future Chord"; fSlots[0].params[pInstrument] = kFirstNeo; fSlots[2] = currentPreset(); fSlots[2].name = "Битва с боссом"; fSlots[2].params[pInstrument] = kFirstRock; }
        #endif
     }
 
@@ -105,7 +118,12 @@ protected:
         {
             const int ni = clampi((int)std::lround(value), 0, kNumInstruments - 1);
             const int oi = clampi((int)std::lround(fParams[pInstrument]), 0, kNumInstruments - 1);
-            if (ni != oi || !fInited) { fPrevChar = kFlavor[oi].ch; fPrevPixel = eraOf(oi) == eraPC98; fSwitchT = now(); fTypeT = now(); fEraTab = eraOf(ni); }
+            if (ni != oi || !fInited)
+            {
+                fPrevChar = kFlavor[oi].ch; fPrevPixel = eraOf(oi) == eraPC98; fSwitchT = now(); fTypeT = now(); fEraTab = eraOf(ni);
+                if (ni >= kFirstXP2 && ni < kFirstNeo) fXPPage = 1;
+                else if (ni >= kFirstXP && ni < kFirstUser && fXPPage == 1) { bool onPage2 = false; for (int k = 0; k < 9; ++k) if (xpHorror()[k] == ni) onPage2 = true; for (int k = 0; k < 8; ++k) if (xpSchool()[k] == ni) onPage2 = true; if (!onPage2) fXPPage = 0; }
+            }
             fInited = true;
         }
         fParams[index] = value;
@@ -118,6 +136,10 @@ protected:
     void stateChanged(const char* key, const char* value) override
     {
         if (key && value && !std::strcmp(key, "lyrics")) { fLyrics = value; parseLyrics(value, fSyl); repaint(); return; }
+        if (key && value && !std::strcmp(key, "song")) { fSongText = value; repaint(); return; }
+        if (key && value && !std::strcmp(key, "slots")) { loadSlots(value); repaint(); return; }
+        if (key && value && !std::strcmp(key, "lessons")) { fLessonMask = (uint32_t)std::strtoul(value, nullptr, 10); repaint(); return; }
+        if (key && !std::strcmp(key, "take")) return;
         if (!key || !value || std::strlen(key) < 4) return;
         const int k = key[std::strlen(key) - 1] - '1';
         if (k < 0 || k > 3) return;
@@ -214,6 +236,7 @@ protected:
     {
         const float sc = getHeight() / kH;
         const float px = ev.pos.getX() / sc, py = ev.pos.getY() / sc;
+        if (fEditor) updateEditorCells();
 
         if (!ev.press)
         {
@@ -226,6 +249,14 @@ protected:
             if (fStoryNext.hit(px, py)) { storyAdvance(); repaint(); return true; }
             if (fStoryExit.hit(px, py)) { fStory = -1; repaint(); return true; }
         }
+        // popups close when clicking outside of them
+        {
+            Box pb; bool open = false;
+            if (fMeterOpen) { pb = mkBox(392, 466, 538, 64); open = true; }
+            else if (fHarmonyOpen) { pb = mkBox(296, 52, 624, 330); open = true; }
+            else if (fToolsOpen) { pb = mkBox(84, 52, 826, 450); open = true; }
+            if (open && !pb.hit(px, py)) { fMeterOpen = fHarmonyOpen = fToolsOpen = false; repaint(); return true; }
+        }
         bool hitEdit = false;
         for (int i = 0; i < fCtlCount; ++i)
             if ((fCtl[i].type == ctLyricEdit || fCtl[i].type == ctLyricRU || fCtl[i].type == ctLyricPaste) && visible(fCtl[i]) && fCtl[i].b.hit(px, py)) hitEdit = true;
@@ -235,7 +266,7 @@ protected:
             Control& c = fCtl[i];
             if (!visible(c) || !c.b.hit(px, py)) continue;
             const int cur = clampi((int)std::lround(fParams[pInstrument]), 0, kNumInstruments - 1);
-            if (c.type == ctAction && fParams[pVocalMode] > 0.5f)
+            if (c.type == ctAction && fParams[pVocalMode] > 0.5f && !overlayOpen())
             {
                 const int ci = clampi((int)std::lround(fParams[pIdol]), 0, kNumIdols - 1);
                 int n = c.value == aPrev ? (ci + kNumIdols - 1) % kNumIdols : (c.value == aNext ? (ci + 1) % kNumIdols : (int)(hash01((int)(fT * 1000)) * kNumIdols) % kNumIdols);
@@ -291,13 +322,59 @@ protected:
             case ctToggle: setParam(c.param, fParams[c.param] > 0.5f ? 0.f : 1.f); break;
             case ctAction:
             {
-                const int lo = fEraTab == eraPC98 ? 0 : (fEraTab == eraXP ? kFirstXP : (fEraTab == eraRock ? kFirstRock : kFirstUser));
-                const int cnt = fEraTab == eraPC98 ? kNumFM : (fEraTab == eraXP ? kNumXP : (fEraTab == eraRock ? kNumRock : kNumUser));
-                int idx = (cur >= lo && cur < lo + cnt) ? cur - lo : 0;
+                // instruments of the current tab, in list order
+                int list[64], cnt = 0;
+                if (fEraTab == eraPC98) for (int k = 0; k < kNumFM; ++k) list[cnt++] = k;
+                else if (fEraTab == eraXP) { for (int k = 0; k < kNumXP; ++k) list[cnt++] = kFirstXP + k; for (int k = 0; k < kNumXP2; ++k) list[cnt++] = kFirstXP2 + k; }
+                else if (fEraTab == eraRock) for (int k = 0; k < kNumRock; ++k) list[cnt++] = kFirstRock + k;
+                else if (fEraTab == eraReiwa) for (int k = 0; k < kNumNeo; ++k) list[cnt++] = kFirstNeo + k;
+                else for (int k = 0; k < kNumUser; ++k) list[cnt++] = kFirstUser + k;
+                int idx = 0;
+                for (int k = 0; k < cnt; ++k) if (list[k] == cur) idx = k;
                 if (c.value == aPrev) idx = (idx + cnt - 1) % cnt;
                 else if (c.value == aNext) idx = (idx + 1) % cnt;
                 else { const int r = (int)(hash01((int)(fT * 1000)) * cnt) % cnt; idx = r == idx ? (r + 1) % cnt : r; }
-                setParam(pInstrument, (float)(lo + idx));
+                if (fParams[pScene] > 0.5f) setParam(pScene, 0.f);
+                setParam(pInstrument, (float)list[idx]);
+                break;
+            }
+            case ctToolsOpen: fToolsOpen = true; break;
+            case ctToolsClose: fToolsOpen = false; break;
+            case ctHarmonyOpen: fHarmonyOpen = true; break;
+            case ctHarmonyClose: fHarmonyOpen = false; break;
+            case ctMeterOpen: fMeterOpen = !fMeterOpen; break;
+            case ctMeterPick: setParam(pMeter, c.value); fMeterOpen = false; break;
+            case ctHarmKey: case ctHarmScale: case ctHarmChord: setParam(c.param, c.value); break;
+            case ctHarmLock: setParam(pScaleLock, fParams[pScaleLock] > 0.5f ? 0.f : 1.f); break;
+            case ctXPPage: fXPPage = (int)c.value; break;
+            case ctVoiceType: applyVoiceType((int)c.value); break;
+            case ctSongGen: makeRandomSong(); break;
+            case ctSongToggle:
+                if (fSongText.empty()) makeRandomSong();
+                else setParam(pSongPlay, fParams[pSongPlay] > 0.5f ? 0.f : 1.f);
+                break;
+            case ctSavePreset: openFile(faSavePreset, true, "my_preset.rnfm", "Save preset (.rnfm)"); break;
+            case ctLoadPreset: openFile(faLoadPreset, false, nullptr, "Load preset (.rnfm)"); break;
+            case ctExportPack: openFile(faExportPack, true, "my_pack.rnfm", "Export preset pack (.rnfm)"); break;
+            case ctImportPack: openFile(faImportPack, false, nullptr, "Import preset pack (.rnfm)"); break;
+            case ctMidiTake:   openFile(faMidiTake, true, "my_take.mid", "Export MIDI (.mid)"); break;
+            case ctMidiSong:
+                if (fSongText.empty()) { status("Сначала нажми RANDOM SONG"); break; }
+                openFile(faMidiSong, true, "random_song.mid", "Export MIDI (.mid)"); break;
+            case ctClearTake: retroTakeClear(getPluginInstancePointer()); setState("take", ""); status("Запись очищена"); break;
+            case ctSlot:
+            {
+                const int k = (int)c.value;
+                if (fSlots[k].valid) { applyPreset(fSlots[k]); status(std::string("Загружен слот ") + std::to_string(k + 1) + ": " + fSlots[k].name); }
+                else status("Слот пуст: нажми SAVE, чтобы сохранить туда текущий звук");
+                break;
+            }
+            case ctSlotStore:
+            {
+                const int k = (int)c.value;
+                fSlots[k] = currentPreset();
+                commitSlots();
+                status(std::string("Сохранено в слот ") + std::to_string(k + 1));
                 break;
             }
             case ctKnob:
@@ -331,14 +408,25 @@ protected:
             case ctEditOpen: { fEditor = true; const int cp = (int)std::lround(fParams[pDrumPattern]); if (isUserPattern(cp)) fEditUser = cp - kFirstUserPattern; else fLastPreset = cp; break; }
             case ctEditClose: fEditor = false; break;
             case ctEditUser: fEditUser = (int)c.value; setParam(pDrumPattern, (float)(kFirstUserPattern + fEditUser)); break;
-            case ctEditLen: fULen[fEditUser] = fULen[fEditUser] == 16 ? 12 : 16; commitPattern(fEditUser); break;
+            case ctEditLen:
+            {
+                const int meter = clampi((int)std::lround(fParams[pMeter]), 0, kNumMeters - 1);
+                if (meter > 0) { status(std::string("Длину задаёт размер ") + kMeters[meter].name + ": " + std::to_string(kMeters[meter].steps) + " шагов. Для своей длины выбери METER: AUTO"); break; }
+                static const int lens[5] = { 8, 12, 16, 20, 24 };
+                int k = 0; while (k < 5 && lens[k] <= fULen[fEditUser]) ++k;
+                fULen[fEditUser] = lens[k % 5];
+                commitPattern(fEditUser);
+                break;
+            }
             case ctEditClear:
-                for (int l = 0; l < kDrumLanes; ++l) std::memset(fUL[fEditUser][l], '-', 16);
+                matchUserToMeter(fEditUser);
+                for (int l = 0; l < kDrumLanes; ++l) std::memset(fUL[fEditUser][l], '-', kMaxSteps);
                 commitPattern(fEditUser); break;
             case ctEditCopy: copyPreset(fEditUser, fLastPreset); commitPattern(fEditUser); break;
             case ctCell:
             {
-                const int lane = (int)c.value / 16, st = (int)c.value % 16;
+                const int lane = (int)c.value / kMaxSteps, st = (int)c.value % kMaxSteps;
+                matchUserToMeter(fEditUser);
                 if (st >= fULen[fEditUser]) break;
                 char& ch = fUL[fEditUser][lane][st];
                 if (ev.button == kMouseButtonRight) ch = '-';
@@ -505,19 +593,30 @@ private:
         Control& c = fCtl[fCtlCount++];
         c.type = t; c.param = param; c.value = value; c.b.x = x; c.b.y = y; c.b.w = w; c.b.h = h; c.label = label; c.group = group;
     }
-    bool visible(const Control& c) const
+    bool overlayOpen() const { return fEditor || fScenesOpen || fStoryMenu || fToolsOpen || fHarmonyOpen || fMeterOpen; }
+    bool shown(const Control& c) const { return visible(c, true); }
+    bool visible(const Control& c, bool ignoreOverlays = false) const
     {
+        if (ignoreOverlays) { if (c.group == gEditor || c.group == gScenes || c.group == gStoryMenu || c.group == gTools || c.group == gHarmony || c.group == gMeter) return false; }
+        else {
         if (fEditor) return c.group == gEditor;
         if (fScenesOpen) return c.group == gScenes;
         if (fStoryMenu) return c.group == gStoryMenu;
-        if (c.group == gEditor || c.group == gScenes || c.group == gStoryMenu) return false;
+        if (fToolsOpen) return c.group == gTools;
+        if (fHarmonyOpen) return c.group == gHarmony;
+        if (fMeterOpen) return c.group == gMeter;
+        if (c.group == gEditor || c.group == gScenes || c.group == gStoryMenu || c.group == gTools || c.group == gHarmony || c.group == gMeter) return false;
+        }
         const bool vocal = fParams[pVocalMode] > 0.5f;
         if (c.group == gVocal) return vocal;
         if (c.group == gInst) return !vocal;
         if (c.group == gFM) return !vocal && fEraTab == eraPC98;
-        if (c.group == gXP) return !vocal && fEraTab == eraXP;
+        if (c.group == gXPTabs) return !vocal && fEraTab == eraXP;
+        if (c.group == gXP) return !vocal && fEraTab == eraXP && fXPPage == 0;
+        if (c.group == gXP2) return !vocal && fEraTab == eraXP && fXPPage == 1;
         if (c.group == gUser) return !vocal && fEraTab == eraUser;
         if (c.group == gRock) return !vocal && fEraTab == eraRock;
+        if (c.group == gReiwa) return !vocal && fEraTab == eraReiwa;
         return true;
     }
 
@@ -542,41 +641,53 @@ private:
     {
         if (isUserPattern(pi) || pi < 0 || pi >= kNumPatterns) pi = 0;
         const DrumPattern& P = kPatterns[presetSlot(pi)];
+        // copy the pattern as it sounds in the current time signature
+        EffPattern E;
+        const int meter = clampi((int)std::lround(fParams[pMeter]), 0, kNumMeters - 1);
+        effectivePattern(P.lane, P.len, P.triplet, P.swing, meter, E);
         for (int l = 0; l < kDrumLanes; ++l)
         {
-            std::memset(fUL[u][l], '-', 16); fUL[u][l][16] = 0;
-            for (int k = 0; k < P.len && P.lane[l][k]; ++k) fUL[u][l][k] = P.lane[l][k];
+            std::memset(fUL[u][l], '-', kMaxSteps); fUL[u][l][kMaxSteps] = 0;
+            for (int k = 0; k < E.len; ++k) fUL[u][l][k] = E.lane[l][k];
         }
-        fULen[u] = P.len;
+        fULen[u] = E.len;
     }
     void parsePattern(int u, const char* str)
     {
         int lane = 0, k = 0;
-        for (int l = 0; l < kDrumLanes; ++l) { std::memset(fUL[u][l], '-', 16); fUL[u][l][16] = 0; }
+        for (int l = 0; l < kDrumLanes; ++l) { std::memset(fUL[u][l], '-', kMaxSteps); fUL[u][l][kMaxSteps] = 0; }
         const char* semi = std::strchr(str, ';');
-        fULen[u] = (semi && std::atoi(semi + 1) == 12) ? 12 : 16;
+        fULen[u] = semi ? clampi(std::atoi(semi + 1), 1, kMaxSteps) : 16;
         for (const char* c = str; *c && c != semi && lane < kDrumLanes; ++c)
         {
             if (*c == '|') { ++lane; k = 0; continue; }
-            if (k < 16) fUL[u][lane][k++] = (*c == 'X' || *c == 'x' || *c == 'g') ? *c : '-';
+            if (k < kMaxSteps) fUL[u][lane][k++] = (*c == 'X' || *c == 'x' || *c == 'g') ? *c : '-';
         }
     }
     void commitPattern(int u)
     {
-        char buf[256]; int n = 0;
+        char buf[320]; int n = 0;
         for (int l = 0; l < kDrumLanes; ++l) { for (int k = 0; k < fULen[u]; ++k) buf[n++] = fUL[u][l][k]; buf[n++] = '|'; }
         n += std::snprintf(buf + n, sizeof(buf) - n, ";%d", fULen[u]);
         char key[8]; std::snprintf(key, sizeof(key), "pat%d", u + 1);
         setState(key, buf);
         if ((int)std::lround(fParams[pDrumPattern]) != kFirstUserPattern + u) setParam(pDrumPattern, (float)(kFirstUserPattern + u));
     }
-    char patStep(int pat, int lane, int st) const
+    // the pattern as the drum machine plays it (adapted to the time signature)
+    const EffPattern& effPat(int pat)
     {
-        if (!isUserPattern(pat)) { const DrumPattern& P = kPatterns[presetSlot(pat)]; return st < P.len ? P.lane[lane][st] : '-'; }
-        const int u = pat - kFirstUserPattern;
-        return st < fULen[u] ? fUL[u][lane][st] : '-';
+        const int meter = clampi((int)std::lround(fParams[pMeter]), 0, kNumMeters - 1);
+        if (isUserPattern(pat))
+        {
+            const int u = pat - kFirstUserPattern;
+            const char* lanes[kDrumLanes];
+            for (int l = 0; l < kDrumLanes; ++l) lanes[l] = fUL[u][l];
+            effectivePattern(lanes, fULen[u], 0, 0.f, meter, fEff);
+        }
+        else { const DrumPattern& P = kPatterns[presetSlot(pat)]; effectivePattern(P.lane, P.len, P.triplet, P.swing, meter, fEff); }
+        return fEff;
     }
-    int patLen(int pat) const { return !isUserPattern(pat) ? kPatterns[presetSlot(pat)].len : fULen[pat - kFirstUserPattern]; }
+    EffPattern fEff;
     static void noteName(int n, char* out, size_t sz)
     {
         static const char* const nm[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
@@ -584,22 +695,38 @@ private:
     }
     bool hover(const Box& b) const { return b.hit(fMouseX, fMouseY); }
 
+    // XP tab, page 2: horror & school sections
+    static const int* xpHorror() { static const int a[9] = { kFirstXP2 + 0, kFirstXP2 + 1, kFirstXP2 + 2, 48, 49, 50, 51, 52, 53 }; return a; }
+    static const int* xpSchool() { static const int a[8] = { kFirstXP2 + 3, kFirstXP2 + 4, kFirstXP2 + 5, kFirstXP2 + 6, 36, 38, 25, 29 }; return a; }
+
     void buildLayout()
     {
-        // era tabs
-        // era tabs (value = Era id): PC-98, WIN XP, ROCK, MY
-        static const char* const tabs[4] = { "PC-98", "WIN XP", "ROCK \xE2\x9A\xA1", "MY \xE2\x99\xAA" };
-        static const int tabEra[4] = { eraPC98, eraXP, eraRock, eraUser };
-        for (int i = 0; i < 4; ++i) addCtl(ctEraTab, pInstrument, (float)tabEra[i], 24.f + i * 57.f, 82.f, 54.f, 22.f, tabs[i], gInst);
+        // era tabs (value = Era id): PC-98, WIN XP, ROCK, REIWA, MY
+        static const char* const tabs[5] = { "PC-98", "WIN XP", "ROCK \xE2\x9A\xA1", "REIWA \xE2\x9C\xA6", "MY \xE2\x99\xAA" };
+        static const int tabEra[5] = { eraPC98, eraXP, eraRock, eraReiwa, eraUser };
+        for (int i = 0; i < 5; ++i) addCtl(ctEraTab, pInstrument, (float)tabEra[i], 22.f + i * 47.f, 82.f, 45.f, 22.f, tabs[i], gInst);
+        // instrument header: prev / next / random (in vocal mode: idols)
+        addCtl(ctAction, pInstrument, aPrev,   150.f, 61.f, 30.f, 20.f, "\xE2\x97\x80");
+        addCtl(ctAction, pInstrument, aNext,   183.f, 61.f, 30.f, 20.f, "\xE2\x96\xB6");
+        addCtl(ctAction, pInstrument, aRandom, 216.f, 61.f, 36.f, 20.f, "\xE2\x9A\x84");
         // ROCK & battle list
         for (int i = 0; i < kNumRock; ++i)
             addCtl(ctSelect, pInstrument, (float)(kFirstRock + i), 26.f + (i % 2) * 117.f, 110.f + (i / 2) * 27.f, 112.f, 23.f, kInstrumentNames[kFirstRock + i], gRock);
+        // REIWA list
+        for (int i = 0; i < kNumNeo; ++i)
+            addCtl(ctSelect, pInstrument, (float)(kFirstNeo + i), 26.f + (i % 2) * 117.f, 110.f + (i / 2) * 27.f, 112.f, 23.f, kInstrumentNames[kFirstNeo + i], gReiwa);
         // PC-98 FM list
         for (int i = 0; i < kNumFM; ++i)
             addCtl(ctSelect, pInstrument, (float)i, 26.f + (i % 2) * 117.f, 110.f + (i / 2) * 27.f, 112.f, 23.f, kInstrumentNames[i], gFM);
-        // Windows XP / 2000s list
+        // Windows XP / 2000s: two pages
+        addCtl(ctXPPage, 0, 0, 26.f, 107.f, 104.f, 18.f, "2000s VN", gXPTabs);
+        addCtl(ctXPPage, 0, 1, 134.f, 107.f, 118.f, 18.f, "HORROR \xE2\x80\xA2 SCHOOL", gXPTabs);
         for (int i = 0; i < kNumXP; ++i)
-            addCtl(ctSelect, pInstrument, (float)(kFirstXP + i), 26.f + (i % 2) * 117.f, 108.f + (i / 2) * 22.f, 112.f, 19.f, kInstrumentNames[kFirstXP + i], gXP);
+            addCtl(ctSelect, pInstrument, (float)(kFirstXP + i), 26.f + (i % 2) * 117.f, 129.f + (i / 2) * 20.4f, 112.f, 18.f, kInstrumentNames[kFirstXP + i], gXP);
+        for (int i = 0; i < 9; ++i)
+            addCtl(ctSelect, pInstrument, (float)xpHorror()[i], 26.f + (i % 2) * 117.f, 148.f + (i / 2) * 24.f, 112.f, 21.f, kInstrumentNames[xpHorror()[i]], gXP2);
+        for (int i = 0; i < 8; ++i)
+            addCtl(ctSelect, pInstrument, (float)xpSchool()[i], 26.f + (i % 2) * 117.f, 302.f + (i / 2) * 24.f, 112.f, 21.f, kInstrumentNames[xpSchool()[i]], gXP2);
         // user sample slots
         for (int k = 0; k < kNumUser; ++k)
         {
@@ -615,60 +742,305 @@ private:
         static const char* const klab[8] = { "VOLUME", "BRIGHT", "RELEASE", "VIBRATO", "LO-FI", "CHORUS", "REVERB", "VELOCITY" };
         for (int i = 0; i < 8; ++i)
             addCtl(ctKnob, knobs[i], 0, 716.f + (i % 2) * 114.f, 84.f + (i / 2) * 88.f, 104.f, 84.f, klab[i], gInst);
-        // vocal mode: voice knobs, idol cards, lyrics controls
+        // vocal mode: voice knobs, idol cards, voice types, lyrics controls
         static const int vknobs[8] = { pVGender, pVFormant, pVBreath, pVVib, pVVibRate, pVBright, pVGlide, pVolume };
         static const char* const vlab[8] = { "GENDER", "VOICE SIZE", "BREATH", "VIBRATO", "VIB SPEED", "BRIGHT", "GLIDE", "VOLUME" };
         for (int i = 0; i < 8; ++i)
             addCtl(ctKnob, vknobs[i], 0, 716.f + (i % 2) * 114.f, 84.f + (i / 2) * 88.f, 104.f, 84.f, vlab[i], gVocal);
         for (int i = 0; i < kNumIdols; ++i)
-            addCtl(ctIdol, pIdol, (float)i, 26.f, 84.f + i * 58.f, 224.f, 54.f, kIdolVoices[i].name, gVocal);
+            addCtl(ctIdol, pIdol, (float)i, 26.f, 86.f + i * 43.f, 224.f, 40.f, kIdolVoices[i].name, gVocal);
+        for (int i = 0; i < kNumVoiceTypes; ++i)
+            addCtl(ctVoiceType, 0, (float)i, 26.f + (i % 2) * 113.f, 362.f + (i / 2) * 22.f, 110.f, 19.f, kVoiceTypes[i].ru, gVocal);
         for (int i = 0; i < 6; ++i)
             addCtl(ctLyricPreset, 0, (float)i, 30.f + i * 92.f, 506.f, 88.f, 20.f, kLyricPresets[i][0], gVocal);
         addCtl(ctLyricEdit,   0, 0, 586.f, 506.f, 92.f, 20.f, "EDIT \xE2\x9C\x8E", gVocal);
         addCtl(ctLyricRewind, 0, 0, 682.f, 506.f, 80.f, 20.f, "\xE2\x9F\xB2 START", gVocal);
         addCtl(ctLyricEdit,   1, 0, 30.f, 474.f, 900.f, 28.f, nullptr, gVocal);   // click on the lyric line = edit
-        // top bar: vocal mode switch
-        addCtl(ctToggle, pVocalMode, 0, 250.f, 10.f, 92.f, 26.f, "VOCAL", gAlways);
-        addCtl(ctScenesOpen, pScene, 0, 348.f, 10.f, 92.f, 26.f, "SCENES", gAlways);
-        addCtl(ctStoryOpen, 0, 0, 446.f, 10.f, 92.f, 26.f, "STORY", gAlways);
+        // top bar
+        addCtl(ctToggle, pVocalMode, 0, 236.f, 10.f, 84.f, 26.f, "VOCAL", gAlways);
+        addCtl(ctScenesOpen, pScene, 0, 324.f, 10.f, 84.f, 26.f, "SCENES", gAlways);
+        addCtl(ctStoryOpen, 0, 0, 412.f, 10.f, 84.f, 26.f, "STORY", gAlways);
+        addCtl(ctToolsOpen, 0, 0, 500.f, 10.f, 84.f, 26.f, "TOOLS", gAlways);
+        addCtl(ctHarmonyOpen, 0, 0, 588.f, 10.f, 150.f, 26.f, "HARMONY", gAlways);
+        addCtl(ctSongGen, 0, 0, 742.f, 10.f, 118.f, 26.f, "RANDOM SONG", gAlways);
+        addCtl(ctSongToggle, pSongPlay, 0, 864.f, 10.f, 30.f, 26.f, "", gAlways);
         addCtl(ctLyricRU,    0, 0, 768.f, 506.f, 52.f, 20.f, "RU", gVocal);
         addCtl(ctLyricPaste, 0, 0, 824.f, 506.f, 78.f, 20.f, "PASTE", gVocal);
-        // scene browser
+        // scene browser (4 columns)
         for (int i = 0; i < kNumScenes; ++i)
-            addCtl(ctSceneCard, pScene, (float)(i + 1), 84.f + (i % 4) * 200.f, 112.f + (i / 4) * 56.f, 194.f, 52.f, kScenes[i].name, gScenes);
-        addCtl(ctSceneOff,    pScene, 0, 610.f, 74.f, 160.f, 26.f, "SCENE OFF", gScenes);
-        addCtl(ctScenesClose, 0, 0, 846.f, 72.f, 28.f, 28.f, "\xE2\x9C\x95", gScenes);
-        // story menu
+            addCtl(ctSceneCard, pScene, (float)(i + 1), 84.f + (i % 4) * 200.f, 108.f + (i / 4) * 50.f, 194.f, 46.f, kScenes[i].name, gScenes);
+        addCtl(ctSceneOff,    pScene, 0, 610.f, 70.f, 160.f, 26.f, "SCENE OFF", gScenes);
+        addCtl(ctScenesClose, 0, 0, 846.f, 68.f, 28.f, 28.f, "\xE2\x9C\x95", gScenes);
+        // story menu: two columns of lessons
         for (int i = 0; i < kNumLessons; ++i)
-            addCtl(ctLesson, 0, (float)i, 150.f, 118.f + i * 66.f, 660.f, 60.f, nullptr, gStoryMenu);
-        addCtl(ctStoryMenuClose, 0, 0, 786.f, 72.f, 28.f, 28.f, "\xE2\x9C\x95", gStoryMenu);
-        // top bar actions
-        addCtl(ctAction, pInstrument, aPrev,   640.f, 10.f, 40.f, 26.f, "\xE2\x97\x80");
-        addCtl(ctAction, pInstrument, aNext,   684.f, 10.f, 40.f, 26.f, "\xE2\x96\xB6");
-        addCtl(ctAction, pInstrument, aRandom, 728.f, 10.f, 104.f, 26.f, "RANDOM");
-        // drums
+            addCtl(ctLesson, 0, (float)i, 52.f + (i / 10) * 432.f, 104.f + (i % 10) * 47.f, 424.f, 43.f, nullptr, gStoryMenu);
+        addCtl(ctStoryMenuClose, 0, 0, 878.f, 62.f, 28.f, 28.f, "\xE2\x9C\x95", gStoryMenu);
+        // drums row 1
         static const char* const modes[3] = { "OFF", "SYNC", "ALWAYS" };
         for (int i = 0; i < 3; ++i) addCtl(ctSelect, pDrumMode, (float)i, 100.f + i * 56.f, 552.f, 52.f, 24.f, modes[i]);
         addCtl(ctKitStep, pDrumKit, -1.f, 278.f, 552.f, 26.f, 24.f, "\xE2\x97\x80");
         addCtl(ctKitStep, pDrumKit,  1.f, 420.f, 552.f, 26.f, 24.f, "\xE2\x96\xB6");
         addCtl(ctToggle, pDrumFill, 0, 456.f, 552.f, 60.f, 24.f, "FILLS");
         addCtl(ctEditOpen, pDrumPattern, 0, 522.f, 552.f, 62.f, 24.f, "EDIT \xE2\x9C\x8E");
+        addCtl(ctMeterOpen, pMeter, 0, 590.f, 552.f, 70.f, 24.f, "METER");
+        addCtl(ctKnob, pSwing, 0, 666.f, 550.f, 96.f, 28.f, "SWING");
+        addCtl(ctKnob, pHumanize, 0, 766.f, 550.f, 98.f, 28.f, "HUMAN");
         for (int g = 0; g < kNumGenres; ++g)
-            addCtl(ctGenre, pDrumGenre, (float)g, 24.f + g * 62.f, 586.f, 59.f, 23.f, kGenres[g].name);
+            addCtl(ctGenre, pDrumGenre, (float)g, 24.f + g * 57.f, 586.f, 55.f, 23.f, kGenres[g].name);
         for (int k = 0; k < 6; ++k)
             addCtl(ctGenrePat, pDrumPattern, (float)k, 24.f + k * 56.f, 614.f, 54.f, 23.f, nullptr);
         for (int u = 0; u < kNumUserPatterns; ++u)
             addCtl(ctSelect, pDrumPattern, (float)(kFirstUserPattern + u), 360.f + u * 56.f, 614.f, 54.f, 23.f, kUserPatternNames[u]);
         addCtl(ctKnob, pDrumVolume, 0, 868.f, 540.f, 72.f, 104.f, "DRUM VOL");
+        // meter popup
+        for (int m = 0; m < kNumMeters; ++m)
+            addCtl(ctMeterPick, pMeter, (float)m, 404.f + m * 58.f, 492.f, 54.f, 28.f, kMeters[m].name, gMeter);
         // drum editor overlay
-        addCtl(ctEditClose, 0, 0, 786.f, 68.f, 26.f, 26.f, "\xE2\x9C\x95", gEditor);
+        addCtl(ctEditClose, 0, 0, 846.f, 68.f, 26.f, 26.f, "\xE2\x9C\x95", gEditor);
         for (int u = 0; u < 4; ++u) addCtl(ctEditUser, 0, (float)u, 160.f + u * 78.f, 100.f, 72.f, 24.f, kUserPatternNames[u], gEditor);
         addCtl(ctEditLen,   0, 0, 476.f, 100.f, 92.f, 24.f, "", gEditor);
         addCtl(ctEditClear, 0, 0, 574.f, 100.f, 62.f, 24.f, "CLEAR", gEditor);
-        addCtl(ctEditCopy,  0, 0, 642.f, 100.f, 160.f, 24.f, "", gEditor);
+        addCtl(ctEditCopy,  0, 0, 642.f, 100.f, 180.f, 24.f, "", gEditor);
         for (int l = 0; l < kDrumLanes; ++l)
-            for (int st = 0; st < 16; ++st)
-                addCtl(ctCell, 0, (float)(l * 16 + st), 238.f + st * 35.f, 140.f + l * 31.f, 33.f, 28.f, nullptr, gEditor);
+            for (int st = 0; st < kMaxSteps; ++st)
+                addCtl(ctCell, 0, (float)(l * kMaxSteps + st), 0, 140.f + l * 31.f, 0, 28.f, nullptr, gEditor);
+        // harmony popup
+        for (int k = 0; k < 12; ++k) addCtl(ctHarmKey, pKey, (float)k, 324.f + k * 46.f, 112.f, 42.f, 26.f, kKeyNames[k], gHarmony);
+        for (int k = 0; k < kNumScales; ++k) addCtl(ctHarmScale, pScale, (float)k, 324.f + (k % 4) * 138.f, 166.f + (k / 4) * 30.f, 134.f, 26.f, kScales[k].name, gHarmony);
+        for (int k = 0; k < kNumChordModes; ++k) addCtl(ctHarmChord, pChord, (float)k, 324.f + k * 92.f, 252.f, 88.f, 26.f, kChordModeNames[k], gHarmony);
+        addCtl(ctHarmLock, pScaleLock, 0, 324.f, 300.f, 300.f, 26.f, "SCALE LOCK", gHarmony);
+        addCtl(ctHarmonyClose, 0, 0, 878.f, 62.f, 28.f, 28.f, "\xE2\x9C\x95", gHarmony);
+        // tools overlay
+        addCtl(ctSavePreset, 0, 0, 104.f, 116.f, 180.f, 30.f, "SAVE PRESET", gTools);
+        addCtl(ctLoadPreset, 0, 0, 292.f, 116.f, 180.f, 30.f, "LOAD PRESET", gTools);
+        for (int k = 0; k < 8; ++k)
+        {
+            const float x = 104.f + (k % 4) * 188.f, y = 196.f + (k / 4) * 54.f;
+            addCtl(ctSlotStore, 0, (float)k, x + 136.f, y + 24.f, 42.f, 20.f, "SAVE", gTools);
+            addCtl(ctSlot, 0, (float)k, x, y, 182.f, 48.f, nullptr, gTools);
+        }
+        addCtl(ctExportPack, 0, 0, 104.f, 314.f, 180.f, 30.f, "EXPORT PACK", gTools);
+        addCtl(ctImportPack, 0, 0, 292.f, 314.f, 180.f, 30.f, "IMPORT PACK", gTools);
+        addCtl(ctMidiTake, 0, 0, 104.f, 396.f, 250.f, 30.f, "EXPORT MIDI: MY TAKE", gTools);
+        addCtl(ctMidiSong, 0, 0, 362.f, 396.f, 250.f, 30.f, "EXPORT MIDI: RANDOM SONG", gTools);
+        addCtl(ctClearTake, 0, 0, 620.f, 396.f, 130.f, 30.f, "CLEAR TAKE", gTools);
+        addCtl(ctToolsClose, 0, 0, 846.f, 62.f, 28.f, 28.f, "\xE2\x9C\x95", gTools);
+    }
+
+    // ================================================================== v8 helpers
+    void status(const std::string& t) { fStatus = t; fStatusT = fT; repaint(); }
+
+    void matchUserToMeter(int u)
+    {
+        const int meter = clampi((int)std::lround(fParams[pMeter]), 0, kNumMeters - 1);
+        if (meter == 0 || fULen[u] == kMeters[meter].steps) return;
+        const char* lanes[kDrumLanes];
+        for (int l = 0; l < kDrumLanes; ++l) lanes[l] = fUL[u][l];
+        EffPattern E;
+        effectivePattern(lanes, fULen[u], 0, 0.f, meter, E);
+        for (int l = 0; l < kDrumLanes; ++l) { std::memset(fUL[u][l], '-', kMaxSteps); std::memcpy(fUL[u][l], E.lane[l], (size_t)E.len); fUL[u][l][kMaxSteps] = 0; }
+        fULen[u] = E.len;
+    }
+    int editorLen() const
+    {
+        const int meter = clampi((int)std::lround(fParams[pMeter]), 0, kNumMeters - 1);
+        return meter > 0 ? kMeters[meter].steps : fULen[fEditUser];
+    }
+    void updateEditorCells()
+    {
+        const int len = editorLen();
+        const float cw = 560.f / (float)len;
+        for (int i = 0; i < fCtlCount; ++i)
+        {
+            Control& c = fCtl[i];
+            if (c.type != ctCell) continue;
+            const int st = (int)c.value % kMaxSteps;
+            if (st < len) { c.b.x = 238.f + st * cw; c.b.w = cw - (len > 16 ? 1.5f : 2.f); }
+            else { c.b.x = -100; c.b.w = 0; }
+        }
+    }
+
+    void applyVoiceType(int k)
+    {
+        const VoiceType& V = kVoiceTypes[clampi(k, 0, kNumVoiceTypes - 1)];
+        if (V.gender >= 0) setParam(pVGender, V.gender);
+        setParam(pVFormant, V.formant); setParam(pVBreath, V.breath); setParam(pVVib, V.vib);
+        setParam(pVVibRate, V.vibRate); setParam(pVBright, V.bright); setParam(pVGlide, V.glide);
+        fTypeT = fT;
+        status(std::string("Типаж голоса: ") + V.ru);
+    }
+    int currentVoiceType() const
+    {
+        for (int k = 0; k < kNumVoiceTypes; ++k)
+        {
+            const VoiceType& V = kVoiceTypes[k];
+            if (std::fabs(fParams[pVFormant] - V.formant) < 0.01f && std::fabs(fParams[pVBreath] - V.breath) < 0.01f &&
+                std::fabs(fParams[pVVib] - V.vib) < 0.5f && std::fabs(fParams[pVGlide] - V.glide) < 0.5f && std::fabs(fParams[pVBright] - V.bright) < 0.01f) return k;
+        }
+        return -1;
+    }
+
+    std::string userPatString(int u) const
+    {
+        std::string s;
+        for (int l = 0; l < kDrumLanes; ++l) { s.append(fUL[u][l], (size_t)fULen[u]); s += '|'; }
+        return s + ";" + std::to_string(fULen[u]);
+    }
+    PresetData currentPreset() const
+    {
+        PresetData P;
+        for (int i = 0; i < kParamCount; ++i) if (!kParams[i].output) { P.params[i] = fParams[i]; P.has[i] = true; }
+        const int inst = clampi((int)std::lround(fParams[pInstrument]), 0, kNumInstruments - 1);
+        const int sc = (int)std::lround(fParams[pScene]);
+        if (fParams[pVocalMode] > 0.5f) P.name = std::string("VOCAL ") + kIdols[clampi((int)std::lround(fParams[pIdol]), 0, kNumIdols - 1)].name;
+        else if (sc > 0 && sc <= kNumScenes) P.name = kScenes[sc - 1].name;
+        else P.name = kInstrumentNames[inst];
+        P.lyrics = fLyrics;
+        for (int u = 0; u < 4; ++u) { P.pats[u] = userPatString(u); P.smp[u] = fSmpPath[u]; P.root[u] = fRoot[u]; }
+        P.song = fSongText;
+        P.valid = true;
+        return P;
+    }
+    void applyPreset(const PresetData& P)
+    {
+        for (int i = 0; i < kParamCount; ++i) if (P.has[i] && !kParams[i].output && i != pInstrument) setParam(i, P.params[i]);
+        if (P.has[pInstrument]) setParam(pInstrument, P.params[pInstrument]);
+        if (!P.lyrics.empty() && P.lyrics != fLyrics) { fLyrics = P.lyrics; parseLyrics(fLyrics.c_str(), fSyl); setState("lyrics", fLyrics.c_str()); }
+        for (int u = 0; u < 4; ++u)
+        {
+            char key[8];
+            if (!P.pats[u].empty()) { parsePattern(u, P.pats[u].c_str()); std::snprintf(key, sizeof(key), "pat%d", u + 1); setState(key, P.pats[u].c_str()); }
+            if (!P.smp[u].empty() && P.smp[u] != fSmpPath[u]) { fSmpPath[u] = P.smp[u]; std::snprintf(key, sizeof(key), "smp%d", u + 1); setState(key, P.smp[u].c_str()); }
+            if (P.root[u] != fRoot[u]) { fRoot[u] = clampi(P.root[u], 0, 127); char v[8]; std::snprintf(key, sizeof(key), "root%d", u + 1); std::snprintf(v, sizeof(v), "%d", fRoot[u]); setState(key, v); }
+        }
+        if (P.song != fSongText) { fSongText = P.song; setState("song", fSongText.c_str()); }
+        fEraTab = eraOf(clampi((int)std::lround(fParams[pInstrument]), 0, kNumInstruments - 1));
+    }
+    void commitSlots()
+    {
+        const std::string j = packToJson(fSlots, "slots", true);
+        setState("slots", j.c_str());
+    }
+    void loadSlots(const char* json)
+    {
+        JVal v; JParser jp(json ? json : "");
+        std::vector<PresetData> got;
+        if (!jp.parse(v) || packFromJson(v, got) < 0) return;
+        for (int k = 0; k < 8; ++k) fSlots[k] = k < (int)got.size() ? got[k] : PresetData();
+    }
+
+    void openFile(int action, bool saving, const char* defName, const char* title)
+    {
+        fFileAction = action;
+        FileBrowserOptions o;
+        o.saving = saving; o.defaultName = defName; o.title = title;
+       #ifdef RETRO_SCREENSHOT
+        if (const char* f = std::getenv("RETRO_FILE")) { uiFileBrowserSelected(f); return; }
+       #endif
+        if (!openFileBrowser(o)) { status("Не удалось открыть окно выбора файла"); fFileAction = faNone; }
+    }
+    static void meterSig(int meter, int& num, int& den)
+    {
+        num = 4; den = 4;
+        if (meter > 0 && meter < kNumMeters) { std::sscanf(kMeters[meter].name, "%d/%d", &num, &den); }
+    }
+    void uiFileBrowserSelected(const char* filename) override
+    {
+        const int a = fFileAction;
+        fFileAction = faNone;
+        if (!filename || !*filename) return;
+        const int meter = clampi((int)std::lround(fParams[pMeter]), 0, kNumMeters - 1);
+        int num, den; meterSig(meter, num, den);
+        switch (a)
+        {
+        case faSavePreset:
+        {
+            const std::string path = withExt(filename, ".rnfm");
+            status(writeTextFile(path.c_str(), presetToJson(currentPreset()) + "\n") ? "Пресет сохранён: " + std::string(baseName(path.c_str())) : "Не удалось записать файл");
+            break;
+        }
+        case faExportPack:
+        {
+            std::vector<PresetData> v;
+            for (const PresetData& P : fSlots) if (P.valid) v.push_back(P);
+            if (v.empty()) v.push_back(currentPreset());
+            const std::string path = withExt(filename, ".rnfm");
+            status(writeTextFile(path.c_str(), packToJson(v, baseName(path.c_str()), false)) ? "Пак сохранён: " + std::to_string(v.size()) + " пресетов" : "Не удалось записать файл");
+            break;
+        }
+        case faLoadPreset:
+        case faImportPack:
+        {
+            std::string txt;
+            if (!readTextFile(filename, txt)) { status("Не удалось прочитать файл"); break; }
+            JVal v; JParser jp(txt);
+            std::vector<PresetData> got;
+            if (!jp.parse(v) || packFromJson(v, got) <= 0) { status("Это не пресет Retro Novel FM (.rnfm)"); break; }
+            if (a == faLoadPreset || got.size() == 1)
+            {
+                for (const PresetData& P : got) if (P.valid) { applyPreset(P); status("Пресет загружен: " + P.name); break; }
+            }
+            else
+            {
+                int n = 0;
+                for (int k = 0; k < 8 && k < (int)got.size(); ++k) { fSlots[k] = got[k]; if (got[k].valid) ++n; }
+                commitSlots();
+                status("Пак загружен в слоты: " + std::to_string(n) + " пресетов");
+            }
+            break;
+        }
+        case faMidiTake:
+        {
+            std::vector<RecEvent> ev; double bpm = 120;
+            if (!retroTakeSnapshot(getPluginInstancePointer(), ev, bpm)) { status("Эта DAW не даёт доступ к записи. Экспортируй MIDI из клипа DAW"); break; }
+            std::vector<MidiNote> notes; bool vocal = false;
+            takeToNotes(ev, meter > 0 ? kMeters[meter].steps : 16, notes, vocal);
+            if (notes.empty()) { status("Запись пуста: сыграй мелодию (клавиатурой или из DAW) и экспортируй снова"); break; }
+            for (MidiNote& m : notes) if (!m.lyric.empty()) { const int k = std::atoi(m.lyric.c_str()); m.lyric = (k >= 0 && k < (int)fSyl.size()) ? std::string(fSyl[k].text) : std::string(); }
+            std::vector<MidiTrack> T(1);
+            T[0].name = vocal ? "Vocal" : kInstrumentNames[clampi((int)std::lround(fParams[pInstrument]), 0, kNumInstruments - 1)];
+            T[0].notes = notes;
+            const std::string path = withExt(filename, ".mid");
+            status(writeMidiFile(path.c_str(), T, bpm, num, den) ? "MIDI сохранён: " + std::to_string(notes.size()) + " нот" + (vocal ? " (с текстом)" : "") : "Не удалось записать файл");
+            break;
+        }
+        case faMidiSong:
+        {
+            std::vector<std::string> syl;
+            for (const Syllable& y : fSyl) syl.push_back(y.text);
+            std::vector<MidiTrack> T;
+            const bool vocal = fParams[pVocalMode] > 0.5f;
+            songToTracks(fSongText.c_str(), syl, vocal, T);
+            if (T.empty()) { status("Сначала нажми RANDOM SONG"); break; }
+            const std::string path = withExt(filename, ".mid");
+            status(writeMidiFile(path.c_str(), T, fSongBpm, 4, 4) ? "MIDI песни сохранён: мелодия, аккорды и бас" : "Не удалось записать файл");
+            break;
+        }
+        default: break;
+        }
+        repaint();
+    }
+
+    void makeRandomSong()
+    {
+        fSongSeed = fSongSeed * 1664525u + 1013904223u + (uint32_t)(now() * 1000.f);
+        const GeneratedSong G = generateSong(fSongSeed);
+        if (fParams[pScene] > 0.5f) setParam(pScene, 0.f);
+        setParam(pInstrument, (float)G.inst);
+        setParam(pDrumGenre, (float)G.genre); setParam(pDrumKit, (float)G.kit);
+        setParam(pDrumPattern, (float)G.pattern); fLastPreset = G.pattern;
+        setParam(pMeter, 0.f); setParam(pKey, (float)G.key); setParam(pScale, (float)G.scale); setParam(pChord, 0.f);
+        setParam(pDrumMode, 2.f);
+        setParam(pVocalMode, G.vocal ? 1.f : 0.f);
+        if (G.vocal) selectIdol(G.idol);
+        fLyrics = G.lyrics; parseLyrics(fLyrics.c_str(), fSyl); setState("lyrics", fLyrics.c_str());
+        fSongText = G.text; fSongTitle = G.title; fSongBpm = G.bpm;
+        setState("song", fSongText.c_str());
+        setParam(pSongPlay, 1.f);
+        fEraTab = eraOf(G.inst);
+        char b[300];
+        std::snprintf(b, sizeof(b), "\xE2\x99\xAA \xC2\xAB%s\xC2\xBB \xE2\x80\x94 %s \xE2\x80\xA2 %s %s \xE2\x80\xA2 %s \xE2\x80\xA2 темп ~%d BPM", G.title.c_str(), G.recipe.c_str(), kKeyNames[G.key], kScales[G.scale].name, G.progression.c_str(), G.bpm);
+        status(b);
     }
 
     void label(float x, float y, const char* s, float size, const Color& c, int align)
@@ -712,66 +1084,205 @@ private:
     // ================================================================== scene
 
     // ================================================================== Story Mode (interactive lessons)
-    enum CondKind { ckNext, ckParamEq, ckParamGE, ckChanged, ckActivity, ckEraTab, ckEditorOpen, ckEditorClosed, ckScenesOpen, ckLyricsSakura };
+    enum CondKind { ckNext, ckParamEq, ckParamGE, ckChanged, ckActivity, ckEraTab, ckEditorOpen, ckEditorClosed, ckScenesOpen, ckLyricsSakura,
+                    ckHarmonyOpen, ckHarmonyClosed, ckToolsOpen, ckMeterOpen, ckXPPage, ckVoiceType, ckParamNe };
     struct StoryStep { int heroine; const char* text; int tType, tParam; float tValue; int ck, cParam; float cValue; };
     struct Lesson { const char* title; const char* desc; int heroine; const StoryStep* steps; int count; };
 
     static const Lesson* lessons()
     {
-        // heroine: 0..8 = kChars, 100+ = kIdols ; tType -1 = no target ; tValue -1 = any value
+        // heroine: 0..11 = kChars, 100+ = kIdols ; tType -1 = no target ; tValue -1 = any value
+        const int R = kFirstNeo, X2 = kFirstXP2, RK = kFirstRock;
         static const StoryStep l1[] = {
-            {0, "Привет! Я Хикари. Покажу, как тут всё устроено, — пара минут, не больше. Жми «Далее».", -1, 0, 0, ckNext, 0, 0},
-            {0, "Слева вкладки эпох: PC-98 — 90-е, WIN XP — 2000-е, ROCK — битвы, MY — твои сэмплы. Открой PC-98.", ctEraTab, pInstrument, (float)eraPC98, ckEraTab, 0, (float)eraPC98},
+            {0, "Привет! Я Хикари. Покажу, как тут всё устроено. Жми «Далее».", -1, 0, 0, ckNext, 0, 0},
+            {0, "Слева вкладки эпох: PC-98 (90-е), WIN XP (2000-е), ROCK (битвы), REIWA (2020-е) и MY (твои сэмплы). Открой PC-98.", ctEraTab, pInstrument, (float)eraPC98, ckEraTab, 0, (float)eraPC98},
             {0, "Выбери «FM E.Piano» — это мой инструмент!", ctSelect, pInstrument, 0, ckParamEq, pInstrument, 0},
             {0, "Сыграй пару нот: MIDI-клавиатурой или в piano roll твоей DAW. Я подожду~", -1, 0, 0, ckActivity, 0, 0},
             {0, "Ручка BRIGHT — звонкость. Потяни её мышкой вверх или вниз.", ctKnob, pBrightness, -1, ckChanged, pBrightness, 0},
             {0, "REVERB — эхо зала. Чуть больше — и звук как в школьном актовом зале.", ctKnob, pReverb, -1, ckChanged, pReverb, 0},
-            {0, "LO-FI делает звук хрустящим, как из старого компьютера. Попробуй!", ctKnob, pLofi, -1, ckChanged, pLofi, 0},
-            {0, "Подсказки: правый клик по ручке — сброс, колесо мыши — точная настройка, Shift — медленнее. Урок пройден!", -1, 0, 0, ckNext, 0, 0},
+            {0, "Стрелки ◀ ▶ и кубик у заголовка листают инструменты вкладки. Нажми кубик — случайный инструмент!", ctAction, pInstrument, (float)aRandom, ckChanged, pInstrument, 0},
+            {0, "Правый клик по ручке — сброс, колесо мыши — точно, Shift — медленнее. Урок пройден! Дальше — как устроена песня.", -1, 0, 0, ckNext, 0, 0},
         };
         static const StoryStep l2[] = {
-            {4, "Я Аканэ! Соберём трек в духе 90-х. В DAW сделай три дорожки с этим плагином: мелодия, аккорды и бас.", -1, 0, 0, ckNext, 0, 0},
-            {4, "Это будет дорожка мелодии. Открой вкладку PC-98.", ctEraTab, pInstrument, (float)eraPC98, ckEraTab, 0, (float)eraPC98},
+            {0, "Любая песня — это четыре слоя: РИТМ (барабаны), БАС, ГАРМОНИЯ (аккорды) и МЕЛОДИЯ. Соберём их по очереди в следующих уроках.", -1, 0, 0, ckNext, 0, 0},
+            {0, "И у песни есть форма: вступление → куплет → припев → куплет → припев → мост → финальный припев. Припев — самое яркое место.", -1, 0, 0, ckNext, 0, 0},
+            {0, "В DAW сделай 3–4 дорожки с этим плагином: мелодия, аккорды, бас (а барабаны играет любая из них). Каждая — свой инструмент.", -1, 0, 0, ckNext, 0, 0},
+            {0, "Включи барабаны: режим ALWAYS — играют всегда, даже без Play.", ctSelect, pDrumMode, 2, ckParamEq, pDrumMode, 2},
+            {0, "Смотри на сетку справа внизу: K — бочка, S — малый, H — хэт. Подсветка бежит по тактам. Каждая клетка — шестнадцатая нота.", -1, 0, 0, ckNext, 0, 0},
+            {0, "Чтобы услышать, как всё звучит вместе, нажми RANDOM SONG вверху — плагин сочинит пример: мелодия, аккорды, бас и барабаны.", ctSongGen, 0, -1, ckParamEq, pSongPlay, 1},
+            {0, "Слышишь слои? Кнопка ■ рядом останавливает песню. Дальше научимся делать всё это самостоятельно!", ctSongToggle, pSongPlay, -1, ckNext, 0, 0},
+        };
+        static const StoryStep l3[] = {
+            {5, "Рин здесь. Темп (BPM) ставится в DAW: баллада 70–90, поп 110–130, битва и евробит 150–170.", -1, 0, 0, ckNext, 0, 0},
+            {5, "Такт обычно из 4 долей (4/4): РАЗ-два-три-четыре. Бочка любит доли 1 и 3, малый — 2 и 4.", -1, 0, 0, ckNext, 0, 0},
+            {5, "Кнопка METER меняет размер такта. Открой её.", ctMeterOpen, pMeter, -1, ckMeterOpen, 0, 0},
+            {5, "Выбери 3/4 — это вальс: РАЗ-два-три. Ритм сам подстроится под новый размер.", ctMeterPick, pMeter, 2, ckParamEq, pMeter, 2},
+            {5, "6/8 и 12/8 — «качающиеся» тройки для баллад и рок-н-ролла, 5/4 и 7/8 — неровные, для тревожных боссов. Верни AUTO.", ctMeterOpen, pMeter, -1, ckParamEq, pMeter, 0},
+            {5, "Важно: поставь такой же размер и в DAW, чтобы такты совпали. Сбивки (FILLS) звучат в конце каждого 4-го такта.", -1, 0, 0, ckNext, 0, 0},
+        };
+        static const StoryStep l4[] = {
+            {2, "Я Сидзука. Ноты песни берутся из лада: 7 нот из 12. Мажор — светлый, минор — грустный и драматичный.", -1, 0, 0, ckNext, 0, 0},
+            {2, "Открой HARMONY вверху.", ctHarmonyOpen, 0, -1, ckHarmonyOpen, 0, 0},
+            {2, "Тоника — «домашняя» нота песни. Выбери A (ля).", ctHarmKey, pKey, 9, ckParamEq, pKey, 9},
+            {2, "Лад: Minor. A минор — любимая тональность грустных сцен.", ctHarmScale, pScale, 1, ckParamEq, pScale, 1},
+            {2, "Включи SCALE LOCK — теперь любая клавиша сама попадёт в лад. Фальшивых нот больше не будет!", ctHarmLock, pScaleLock, -1, ckParamEq, pScaleLock, 1},
+            {2, "Pentatonic (5 нот) звучит «по-японски», Japan In — тайна и храмы, Ryukyu — Окинава. Закрой окно и поиграй.", ctHarmonyClose, 0, -1, ckHarmonyClosed, 0, 0},
+            {2, "Сыграй что-нибудь — даже по чёрным клавишам. Всё в ладу!", -1, 0, 0, ckActivity, 0, 0},
+        };
+        static const StoryStep l5[] = {
+            {2, "Аккорд — несколько нот вместе. Плагин умеет строить аккорд из одной клавиши. Открой HARMONY.", ctHarmonyOpen, 0, -1, ckHarmonyOpen, 0, 0},
+            {2, "Выбери TRIAD — трезвучие из 3 нот, основа любой песни.", ctHarmChord, pChord, 1, ckParamEq, pChord, 1},
+            {2, "Внизу окна — аккорды лада. m — минорный, dim — уменьшённый. Римская цифра — ступень: I — тоника, IV и V — самые сильные.", -1, 0, 0, ckNext, 0, 0},
+            {2, "Закрой окно и нажми одну клавишу — прозвучит целый аккорд.", ctHarmonyClose, 0, -1, ckActivity, 0, 0},
+            {2, "7TH — мягкие джазовые септаккорды (city pop, lo-fi), 9TH — пышные аккорды future bass, POWER — рок, SUS4 — «зависший» звук.", -1, 0, 0, ckNext, 0, 0},
+            {2, "Для мелодии верни CHORD на OFF, иначе каждая нота станет аккордом. Совет: аккорды — на отдельной дорожке DAW.", -1, 0, 0, ckNext, 0, 0},
+        };
+        static const StoryStep l6[] = {
+            {4, "Аканэ на связи! Последовательность аккордов — скелет песни. Самая известная в J-pop — «королевская» (ōdō shinkō): IV–V–iii–vi.", -1, 0, 0, ckNext, 0, 0},
+            {4, "В До мажоре это F – G – Em – Am. С TRIAD и SCALE LOCK жми клавиши F, G, E, A — по одной на такт.", -1, 0, 0, ckNext, 0, 0},
+            {4, "В HARMONY поставь тонику C и лад Major, режим TRIAD и SCALE LOCK.", ctHarmonyOpen, 0, -1, ckNext, 0, 0},
+            {4, "Ещё рецепты: vi–IV–V–I (Комуро, 90-е), I–V–vi–IV (поп), I–V–vi–iii–IV–I–IV–V (канон), i–VI–VII–i (эпик в миноре).", -1, 0, 0, ckNext, 0, 0},
+            {4, "Обычно один аккорд звучит 1 такт (4 доли). В припеве можно менять аккорды чаще — так энергия растёт.", -1, 0, 0, ckNext, 0, 0},
+            {4, "Сыграй F G Em Am по кругу — узнаёшь звучание аниме-опенинга?", -1, 0, 0, ckActivity, 0, 0},
+        };
+        static const StoryStep l7[] = {
+            {6, "Мидори. Мелодия запоминается, если в ней есть мотив — короткая фраза на 1–2 такта, которая повторяется.", -1, 0, 0, ckNext, 0, 0},
+            {6, "Правило: на сильных долях (1 и 3) ставь ноты аккорда, между ними — соседние ноты лада. Так мелодия «дружит» с гармонией.", -1, 0, 0, ckNext, 0, 0},
+            {6, "Форма вопрос–ответ: такты 1–2 — вопрос (кончается не на тонике), такты 3–4 — ответ (возвращается домой, на тонику).", -1, 0, 0, ckNext, 0, 0},
+            {6, "Двигайся в основном шагами, а скачки делай редко и в важных местах. После большого скачка вверх — шаг вниз.", -1, 0, 0, ckNext, 0, 0},
+            {6, "В припеве мелодия обычно выше и длиннее нотами, чем в куплете. Самая высокая нота — кульминация.", -1, 0, 0, ckNext, 0, 0},
+            {6, "Выбери флейту во вкладке WIN XP и сыграй мотив из 4–5 нот. С SCALE LOCK мимо не попадёшь!", ctSelect, pInstrument, (float)(kFirstXP + 9), ckActivity, 0, 0},
+        };
+        static const StoryStep l8[] = {
+            {5, "Бас держит песню снизу. Самое простое и правильное: играй основной тон аккорда на первую долю такта.", -1, 0, 0, ckNext, 0, 0},
+            {5, "Открой вкладку ROCK.", ctEraTab, pInstrument, (float)eraRock, ckEraTab, 0, (float)eraRock},
+            {5, "Выбери «Bass Guitar» — настоящая бас-гитара.", ctSelect, pInstrument, (float)(RK + 6), ckParamEq, pInstrument, (float)(RK + 6)},
+            {5, "Рок: восьмые на одной ноте. Евробит: «октавы» — нижняя и верхняя нота по очереди. Баллада: длинные ноты.", -1, 0, 0, ckNext, 0, 0},
+            {5, "Совпадай с бочкой: где бьёт бочка — там и бас. Играй ниже C3 (левой рукой).", -1, 0, 0, ckActivity, 0, 0},
+            {5, "Во вкладке REIWA есть 808 Glide — накладывай ноты внахлёст, и бас будет скользить, как в современных треках.", -1, 0, 0, ckNext, 0, 0},
+        };
+        static const StoryStep l9[] = {
+            {5, "Барабаны задают жанр. Включи ALWAYS, чтобы слышать ритм.", ctSelect, pDrumMode, 2, ckParamEq, pDrumMode, 2},
+            {5, "Ряд стилей: VN/RPG, EUROBEAT, J-ROCK, POP, JAZZ, ELECTRO, EPIC, LO-FI, CHIPTUNE и REIWA. Выбери JAZZ/CAFE.", ctGenre, pDrumGenre, 4, ckParamEq, pDrumGenre, 4},
+            {5, "Ниже — 6 ритмов стиля. Кит (◀ KIT ▶) меняет звук барабанов, ритм остаётся тем же.", -1, 0, 0, ckNext, 0, 0},
+            {5, "Стиль POP/ANISON, ритм Pop — прямые восьмые. Теперь покрути SWING — восьмые станут «качающимися».", ctKnob, pSwing, -1, ckChanged, pSwing, 0},
+            {5, "HUMAN — «живой барабанщик»: чуть-чуть сдвигает удары и меняет силу. 20–40% — естественно, 100% — пьяный ударник~", ctKnob, pHumanize, -1, ckChanged, pHumanize, 0},
+            {5, "FILLS — сбивка в конце каждого 4-го такта и тарелка на новом круге. Так слушатель чувствует части песни.", ctToggle, pDrumFill, -1, ckNext, 0, 0},
+        };
+        static const StoryStep l10[] = {
+            {5, "Сделаем свой ритм! Нажми EDIT ✎ у барабанов.", ctEditOpen, pDrumPattern, -1, ckEditorOpen, 0, 0},
+            {5, "Кликай по клеткам: удар → акцент (!) → тихий (·). Правый клик — стереть. Сетка подстраивается под METER: до 24 шагов.", -1, 0, 0, ckNext, 0, 0},
+            {5, "COPY копирует выбранный готовый ритм — удобно начать с него и переделать.", ctEditCopy, 0, -1, ckNext, 0, 0},
+            {5, "В режиме METER: AUTO кнопка шагов меняет длину: 8, 12, 16, 20 или 24.", ctEditLen, 0, -1, ckNext, 0, 0},
+            {5, "Закрой редактор. Твой паттерн выбран (User 1–4) и сохранится в проекте.", ctEditClose, 0, -1, ckEditorClosed, 0, 0},
+        };
+        static const StoryStep l11[] = {
+            {4, "Соберём трек в духе 90-х! Открой вкладку PC-98.", ctEraTab, pInstrument, (float)eraPC98, ckEraTab, 0, (float)eraPC98},
             {4, "Выбери «PC-98 Lead» — квадратная волна, как на старых компьютерах.", ctSelect, pInstrument, 6, ckParamEq, pInstrument, 6},
             {4, "Добавь LO-FI примерно на треть — так звучали звуковые чипы.", ctKnob, pLofi, -1, ckParamGE, pLofi, 0.25f},
             {4, "Немного CHORUS — для ширины звука.", ctKnob, pChorus, -1, ckChanged, pChorus, 0},
-            {4, "Барабаны: включи SYNC — они будут играть вместе с DAW.", ctSelect, pDrumMode, 1, ckParamEq, pDrumMode, 1},
-            {4, "Стиль барабанов VN/RPG — FM-барабаны PC-98, как в играх той эпохи.", ctGenre, pDrumGenre, 0, ckParamEq, pDrumKit, 0},
+            {4, "Барабаны: SYNC — играют вместе с DAW.", ctSelect, pDrumMode, 1, ckParamEq, pDrumMode, 1},
+            {4, "Стиль VN/RPG — FM-барабаны PC-98, как в играх той эпохи.", ctGenre, pDrumGenre, 0, ckParamEq, pDrumKit, 0},
             {4, "Ритм «Town Theme» — типичный для RPG 90-х.", ctGenrePat, pDrumPattern, 1, ckParamEq, pDrumPattern, 2},
-            {4, "На второй дорожке выбери «FM E.Piano» для аккордов, на третьей — «Synth Bass». Мелодию строй на нотах до-ре-ми-соль-ля — это пентатоника, звук сразу «японский».", -1, 0, 0, ckNext, 0, 0},
-            {4, "Нажми Play в DAW! Все настройки сохранятся вместе с проектом. Вперёд, к приключениям!", -1, 0, 0, ckNext, 0, 0},
+            {4, "Аккорды — FM E.Piano на второй дорожке, бас — Synth Bass на третьей. Мелодия на пентатонике (до-ре-ми-соль-ля) сразу звучит «по-японски». Вперёд!", -1, 0, 0, ckNext, 0, 0},
         };
-        static const StoryStep l3[] = {
-            {5, "Рин на связи. Сцены — это готовые наборы: инструменты, барабаны и эффекты для разных ситуаций.", -1, 0, 0, ckNext, 0, 0},
-            {5, "Открой SCENES наверху.", ctScenesOpen, pScene, -1, ckScenesOpen, 0, 0},
+        static const StoryStep l12[] = {
+            {1, "Сузу! Сцена «школьный день». Открой WIN XP.", ctEraTab, pInstrument, (float)eraXP, ckEraTab, 0, (float)eraXP},
+            {1, "Переключи страницу на HORROR • SCHOOL.", ctXPPage, 0, 1, ckXPPage, 0, 1},
+            {1, "«School Chime» — тот самый японский звонок: дин-дон-дан-дон. Сыграй ми–до–ре–соль… и обратно!", ctSelect, pInstrument, (float)(X2 + 3), ckParamEq, pInstrument, (float)(X2 + 3)},
+            {1, "«Xylophone» — для весёлых сцен, «Class Piano» — старое расстроенное пианино в музыкальном классе.", ctSelect, pInstrument, (float)(X2 + 6), ckParamEq, pInstrument, (float)(X2 + 6)},
+            {1, "Для повседневности бери мажор, темп 100–120 и ритм «Daily Life» в стиле VN/RPG.", ctGenre, pDrumGenre, 0, ckNext, 0, 0},
+            {1, "Готовая сцена «Звонок с урока» есть в SCENES — там уже три инструмента вместе. Попробуй!", ctScenesOpen, pScene, -1, ckNext, 0, 0},
+        };
+        static const StoryStep l13[] = {
+            {8, "Сумирэ... Сделаем страшно. Открой WIN XP, страница HORROR • SCHOOL.", ctXPPage, 0, 1, ckXPPage, 0, 1},
+            {8, "«Cursed Box» — шкатулка с уставшей пружиной. Играй медленно и высоко.", ctSelect, pInstrument, (float)X2, ckParamEq, pInstrument, (float)X2},
+            {8, "Лад решает всё. В HARMONY выбери Japan In — японский лад с пугающей малой секундой.", ctHarmonyOpen, 0, -1, ckParamEq, pScale, 4},
+            {8, "«Detuned Pad» — расстроенный фон, «что-то не так». Держи один аккорд долго.", ctSelect, pInstrument, (float)(X2 + 2), ckParamEq, pInstrument, (float)(X2 + 2)},
+            {8, "«Reverse Cymbal» — нарастающее шшшШШ перед скримером. Нажми клавишу за такт до удара.", ctSelect, pInstrument, (float)(X2 + 1), ckParamEq, pInstrument, (float)(X2 + 1)},
+            {8, "Хоррору нужна тишина: барабаны OFF или только редкая бочка, как сердцебиение. Темп 60–75. Больше REVERB.", -1, 0, 0, ckNext, 0, 0},
+        };
+        static const StoryStep l14[] = {
+            {5, "Битва! Готовые сцены — в SCENES. Открой.", ctScenesOpen, pScene, -1, ckScenesOpen, 0, 0},
             {5, "Выбери «Битва с боссом».", ctSceneCard, pScene, 16, ckParamEq, pScene, 16},
-            {5, "Играй! Ниже C3 (левая рука) — бас-гитара, выше — гитара и струнные вместе. Барабаны уже на SYNC — нажми Play в DAW.", -1, 0, 0, ckActivity, 0, 0},
+            {5, "Играй! Ниже C3 — бас-гитара, выше — гитара и струнные. Битвы почти всегда в миноре и в темпе 150–180.", -1, 0, 0, ckActivity, 0, 0},
             {5, "Во вкладке ROCK есть ритмичные инструменты. Открой её.", ctEraTab, pInstrument, (float)eraRock, ckEraTab, 0, (float)eraRock},
-            {5, "Выбери «Chug 16th» и зажми аккорд — гитара сама сыграет шестнадцатыми в темп песни.", ctSelect, pInstrument, (float)(kFirstRock + 5), ckParamEq, pInstrument, (float)(kFirstRock + 5)},
-            {5, "Ещё попробуй «Battle Arp» и «Str Ostinato». Для кульминации — сцены «Кульминация» и «Финальный босс»!", -1, 0, 0, ckNext, 0, 0},
+            {5, "«Chug 16th»: зажми аккорд — гитара сама сыграет шестнадцатыми в темп.", ctSelect, pInstrument, (float)(RK + 5), ckParamEq, pInstrument, (float)(RK + 5)},
+            {5, "Ещё: «Battle Arp», «Str Ostinato», а для финала — сцены «Кульминация» и «Финальный босс». Последовательность i–VI–VII–i — классика!", -1, 0, 0, ckNext, 0, 0},
         };
-        static const StoryStep l4[] = {
+        static const StoryStep l15[] = {
+            {4, "Евробит — скорость, минор и много синтов (как в гоночных аниме). Стиль барабанов EUROBEAT.", ctGenre, pDrumGenre, 1, ckParamEq, pDrumGenre, 1},
+            {4, "Открой REIWA и выбери «Supersaw Lead» — главный голос евробита.", ctSelect, pInstrument, (float)(R + 12), ckParamEq, pInstrument, (float)(R + 12)},
+            {4, "Бас — октавами восьмыми, аккорды — VI–VII–i. Темп DAW 150–160. Мелодия — короткими повторяющимися фразами.", -1, 0, 0, ckNext, 0, 0},
+            {4, "Ритмы Euro Verse для куплета и Euro Chorus для припева. Переключай их между частями песни!", ctGenrePat, pDrumPattern, 1, ckParamEq, pDrumPattern, 21},
+            {4, "Опенинг аниме строится так же: интро 4 такта, куплет 8, предприпев 4, припев 8. Главное — яркий припев!", -1, 0, 0, ckNext, 0, 0},
+        };
+        static const StoryStep l16[] = {
+            {9, "Я Мирай из эпохи REIWA! Это звуки современных игр и опенингов 2020-х. Открой вкладку REIWA.", ctEraTab, pInstrument, (float)eraReiwa, ckEraTab, 0, (float)eraReiwa},
+            {9, "«Future Chord» — пышные аккорды, которые «дышат» в такт бочке.", ctSelect, pInstrument, (float)R, ckParamEq, pInstrument, (float)R},
+            {9, "В HARMONY включи CHORD 9TH — одна клавиша даст аккорд из 5 нот, как в future bass!", ctHarmonyOpen, 0, -1, ckParamEq, pChord, 3},
+            {9, "Барабаны: стиль REIWA, ритм Future Bass (половинный темп: малый на 3-ю долю).", ctGenre, pDrumGenre, 9, ckParamEq, pDrumGenre, 9},
+            {9, "Сыграй аккорды IV–V–iii–vi с режимом ALWAYS — слышишь «качание»? Мелодию бери «Kawaii Lead» или «Crystal Pluck».", -1, 0, 0, ckActivity, 0, 0},
+            {9, "Для «ва»-фэнтези — «Erhu» и «Shamisen» с ладом Minor Pent. Для ритм-игр — «J-Core Hoover» и темп 170+!", -1, 0, 0, ckNext, 0, 0},
+        };
+        static const StoryStep l17[] = {
+            {10, "Амэ. Lo-fi и city pop — это септаккорды и мягкий грув. Открой REIWA и выбери «Lo-Fi Keys».", ctSelect, pInstrument, (float)(R + 6), ckParamEq, pInstrument, (float)(R + 6)},
+            {10, "В HARMONY поставь CHORD 7TH — каждая клавиша даст мягкий септаккорд.", ctHarmonyOpen, 0, -1, ckParamEq, pChord, 2},
+            {10, "Стиль барабанов LO-FI.", ctGenre, pDrumGenre, 7, ckParamEq, pDrumGenre, 7},
+            {10, "SWING около 40% и HUMAN 30% — ритм «плывёт», как у живого битмейкера.", ctKnob, pSwing, -1, ckParamGE, pSwing, 0.3f},
+            {10, "Ручка LO-FI делает звук старой кассетой. Добавь чуть-чуть.", ctKnob, pLofi, -1, ckChanged, pLofi, 0},
+            {10, "City pop: «City Pop EP» + «Slap Funk Bass» + ритм City Pop, последовательность IV–iii–vi–I. Неоновая ночь готова!", -1, 0, 0, ckNext, 0, 0},
+        };
+        static const StoryStep l18[] = {
             {100, "Привет, я Сора! Включи VOCAL наверху.", ctToggle, pVocalMode, -1, ckParamEq, pVocalMode, 1},
             {100, "Выбери меня в списке айдолов слева.", ctIdol, pIdol, 0, ckParamEq, pIdol, 0},
             {100, "Нажми «Sakura» — это готовый текст.", ctLyricPreset, 0, 2, ckLyricsSakura, 0, 0},
             {100, "Сыграй мелодию: каждая нота — следующий слог. Перекрывай ноты — получится плавное легато.", -1, 0, 0, ckActivity, 0, 0},
-            {100, "Свой текст: EDIT ✎ и набирай слоги через пробел. RU — русская раскладка, PASTE (или Ctrl+V) — вставить скопированный текст.", ctLyricEdit, 0, -1, ckNext, 0, 0},
-            {100, "Ручка BREATH добавляет придыхание. Попробуй!", ctKnob, pVBreath, -1, ckChanged, pVBreath, 0},
-            {100, "Готово! Текст начинается сначала каждый раз, когда ты жмёшь Play в DAW.", -1, 0, 0, ckNext, 0, 0},
+            {100, "Типаж голоса: цундэрэ, яндэрэ, учительница, младшая сестра, тихий голос, рок-вокал. Попробуй любой!", ctVoiceType, 0, -1, ckVoiceType, 0, 0},
+            {100, "Свой текст: EDIT ✎ и слоги через пробел. RU — русская раскладка, PASTE (или Ctrl+V) — вставить.", ctLyricEdit, 0, -1, ckNext, 0, 0},
+            {100, "Пиши мелодию для голоса в удобном диапазоне (примерно C4–C6) и давай ей дышать паузами. Текст начинается сначала при Play в DAW.", -1, 0, 0, ckNext, 0, 0},
         };
-        static const StoryStep l5[] = {
-            {5, "Сделаем свой ритм! Нажми EDIT ✎ у барабанов.", ctEditOpen, pDrumPattern, -1, ckEditorOpen, 0, 0},
-            {5, "Кликай по клеткам: обычный удар → акцент (!) → тихий (·). Правый клик — стереть. Сделай пару ударов и жми «Далее».", -1, 0, 0, ckNext, 0, 0},
-            {5, "COPY копирует выбранный готовый ритм — удобно начать с него и переделать.", ctEditCopy, 0, -1, ckNext, 0, 0},
-            {5, "Закрой редактор. Твой паттерн уже выбран (User 1–4) и сохранится в проекте.", ctEditClose, 0, -1, ckEditorClosed, 0, 0},
+        static const StoryStep l19[] = {
+            {10, "Аранжировка: не играй всё сразу! Интро — 1–2 инструмента, куплет — добавь бас и барабаны, припев — всё вместе и громче.", -1, 0, 0, ckNext, 0, 0},
+            {10, "Мост (bridge) — смена настроения: другие аккорды, тише или наоборот. После него последний припев звучит ещё ярче.", -1, 0, 0, ckNext, 0, 0},
+            {10, "Сведение: самое громкое — мелодия или вокал. Бас и бочка — плотные, аккорды — тише и шире (CHORUS).", -1, 0, 0, ckNext, 0, 0},
+            {10, "Барабаны слишком громкие? Ручка DRUM VOL справа внизу.", ctKnob, pDrumVolume, -1, ckChanged, pDrumVolume, 0},
+            {10, "REVERB: пэдам и мелодии побольше, басу — почти ноль. Ручки можно автоматизировать в DAW — например, открывать BRIGHT к припеву.", ctKnob, pReverb, -1, ckNext, 0, 0},
+            {10, "Готовые наборы инструментов для частей песни — в SCENES. Разные сцены на разных дорожках = мгновенная аранжировка.", -1, 0, 0, ckNext, 0, 0},
         };
-        static const Lesson L[] = {
-            {"Первые шаги",        "эпохи, инструменты, главные ручки",     0, l1, (int)(sizeof(l1) / sizeof(l1[0]))},
-            {"Трек в стиле 90-х",  "мелодия PC-98, lo-fi, барабаны, советы", 4, l2, (int)(sizeof(l2) / sizeof(l2[0]))},
-            {"Сцены и битвы",      "готовые сцены, рок, ритмичные партии",   5, l3, (int)(sizeof(l3) / sizeof(l3[0]))},
-            {"Поющие айдолы",      "вокал, тексты, голос",                   100, l4, (int)(sizeof(l4) / sizeof(l4[0]))},
-            {"Свои барабаны",      "редактор паттернов",                     5, l5, (int)(sizeof(l5) / sizeof(l5[0]))},
+        static const StoryStep l20[] = {
+            {11, "Кира. Финал курса — рецепт ЛЮБОЙ песни: 1) жанр и темп, 2) тональность и лад, 3) аккорды, 4) барабаны, 5) бас, 6) мелодия, 7) текст, 8) аранжировка, 9) сведение.", -1, 0, 0, ckNext, 0, 0},
+            {11, "Хочешь сделать песню, которую услышал? Найди её тонику (нота, на которой мелодия «отдыхает»), лад и темп — и подбирай аккорды из HARMONY.", -1, 0, 0, ckNext, 0, 0},
+            {11, "Нет идей? RANDOM SONG сочинит набросок: мелодию, аккорды, бас и ритм в одном из 12 жанров.", ctSongGen, 0, -1, ckParamEq, pSongPlay, 1},
+            {11, "Открой TOOLS.", ctToolsOpen, 0, -1, ckToolsOpen, 0, 0},
+            {11, "EXPORT MIDI: RANDOM SONG — три дорожки для DAW. МОЯ ИГРА — то, что ты сыграл (с текстом, если пел вокалоид).", ctMidiSong, 0, -1, ckNext, 0, 0},
+            {11, "SAVE PRESET сохраняет всё в файл .rnfm, слоты — 8 быстрых пресетов прямо в проекте. Делись паками с друзьями!", ctSavePreset, 0, -1, ckNext, 0, 0},
+            {11, "Финальный шаг — экспорт аудио в DAW (Render / Export). Ты прошёл весь курс. Теперь — твоя песня!", -1, 0, 0, ckNext, 0, 0},
         };
+#define LES(t, d, h, a) {t, d, h, a, (int)(sizeof(a) / sizeof(a[0]))}
+        static const Lesson L[kNumLessons] = {
+            LES("Первые шаги",               "эпохи, инструменты, ручки",            0, l1),
+            LES("Как устроена песня",        "4 слоя, форма, RANDOM SONG",           0, l2),
+            LES("Темп, такт и размер",       "BPM, доли, METER 3/4 6/8 7/8",          5, l3),
+            LES("Ноты, тональность и лад",   "HARMONY, мажор/минор, SCALE LOCK",      2, l4),
+            LES("Аккорды одной клавишей",    "трезвучия, 7TH, 9TH, POWER",            2, l5),
+            LES("Последовательности аккордов", "королевская IV–V–iii–vi и другие",      4, l6),
+            LES("Мелодия, которая цепляет",  "мотив, вопрос–ответ, кульминация",      6, l7),
+            LES("Бас — фундамент",           "основной тон, октавы, 808",             5, l8),
+            LES("Барабаны и грув",           "стили, SWING, HUMAN, сбивки",           5, l9),
+            LES("Свои барабаны",             "редактор до 24 шагов",                  5, l10),
+            LES("Трек в стиле 90-х",         "PC-98, lo-fi, RPG-ритм",                4, l11),
+            LES("Школьный день",             "звонок, ксилофон, пианино класса",      1, l12),
+            LES("Хоррор-сцена",              "шкатулка, лад Ин, обратная тарелка",    8, l13),
+            LES("Битва с боссом",            "сцены, рок, ритмичные партии",          5, l14),
+            LES("Евробит и опенинг",         "суперсо, октавный бас, форма",          4, l15),
+            LES("Звук 2020-х: REIWA",        "future bass, 9TH, современные ритмы",   9, l16),
+            LES("Lo-fi и city pop",          "септаккорды, свинг, кассета",          10, l17),
+            LES("Поющие айдолы",             "вокал, текст, типажи голоса",         100, l18),
+            LES("Аранжировка и сведение",    "части песни, громкость, эффекты",      10, l19),
+            LES("Своя песня от А до Я",      "рецепт, RANDOM SONG, экспорт",         11, l20),
+        };
+#undef LES
         return L;
     }
 
@@ -789,7 +1300,12 @@ private:
     void storyAdvance()
     {
         if (fStory < 0) return;
-        if (++fStoryStep >= lessons()[fStory].count) { fStory = -1; return; }
+        if (++fStoryStep >= lessons()[fStory].count)
+        {
+            fLessonMask |= 1u << fStory;
+            setState("lessons", std::to_string(fLessonMask).c_str());
+            fStory = -1; return;
+        }
         storyEnterStep();
     }
     bool storyCondition(const StoryStep& S)
@@ -805,6 +1321,13 @@ private:
         case ckEditorClosed: return !fEditor;
         case ckScenesOpen: return fScenesOpen;
         case ckLyricsSakura: return fLyrics.find("sa ku ra") != std::string::npos;
+        case ckHarmonyOpen: return fHarmonyOpen;
+        case ckHarmonyClosed: return !fHarmonyOpen;
+        case ckToolsOpen: return fToolsOpen;
+        case ckMeterOpen: return fMeterOpen;
+        case ckXPPage: return fEraTab == eraXP && fXPPage == (int)S.cValue;
+        case ckVoiceType: return currentVoiceType() >= 0;
+        case ckParamNe: return std::fabs(fParams[S.cParam] - S.cValue) > 0.01f;
         default: return false;
         }
     }
@@ -826,7 +1349,180 @@ private:
     {
         if (fScenesOpen) drawSceneBrowser();
         if (fStoryMenu) drawStoryMenu();
+        if (fHarmonyOpen) drawHarmony();
+        if (fToolsOpen) drawTools();
+        if (fMeterOpen) drawMeterPopup();
         if (fStory >= 0) drawStory();
+        drawStatus();
+    }
+
+    void drawStatus()
+    {
+        const float age = fT - fStatusT;
+        if (fStatus.empty() || age > 6.f) return;
+        const float al = std::fmin(1.f, std::fmin(age * 6.f, (6.f - age) * 1.5f));
+        fontFace(NANOVG_DEJAVU_SANS_TTF); fontSize(12.f);
+        Rectangle<float> bnd; const float w = std::fmin(880.f, textBounds(0, 0, fStatus.c_str(), nullptr, bnd) + 36.f);
+        const float x = (kW - w) / 2, y = 54;
+        beginPath(); roundedRect(x, y, w, 28, 14); fillColor(Color(30, 20, 60, 0.9f * al)); fill();
+        strokeWidth(1.5f); strokeColor(Color(255, 180, 220, 0.9f * al)); stroke();
+        label(kW / 2, y + 15, fStatus.c_str(), 12.f, Color(255, 255, 255, al), ALIGN_CENTER | ALIGN_MIDDLE);
+    }
+
+    void chip(const Control& c, bool sel, uint32_t accent, const char* text, float fs = 11.f)
+    {
+        pill(c.b, sel, hover(c.b), accent, std::fmin(11.f, c.b.h * 0.5f));
+        label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, text, fs, sel ? Color(255, 255, 255) : Color(70, 40, 90), ALIGN_CENTER | ALIGN_MIDDLE);
+    }
+    void closeButton(const Control& c)
+    {
+        beginPath(); circle(c.b.x + 14, c.b.y + 14, 13); fillColor(hover(c.b) ? Color(255, 120, 160) : Color(230, 180, 200)); fill();
+        label(c.b.x + 14, c.b.y + 15, c.label, 14.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
+    }
+
+    // ---- HARMONY: key, scale, one-key chords, scale lock
+    void drawHarmony()
+    {
+        beginPath(); rect(0, 0, kW, kH); fillColor(Color(16, 8, 36, 0.35f)); fill();
+        fPixelUI = false;
+        glassPanel(296, 52, 624, 330, 0x3fae6a, 16.f);
+        fillColor(hexc(0x3fae6a)); drawFlower(318, 78, 9);
+        label(334, 84, "HARMONY", 17.f, Color(40, 80, 60), ALIGN_LEFT | ALIGN_BASELINE);
+        label(434, 84, "тональность, лад и аккорды одной клавишей", 10.5f, Color(90, 120, 100), ALIGN_LEFT | ALIGN_BASELINE);
+        label(324, 106, "ТОНИКА (KEY)", 9.f, Color(90, 120, 100), ALIGN_LEFT | ALIGN_BASELINE);
+        label(324, 160, "ЛАД (SCALE)", 9.f, Color(90, 120, 100), ALIGN_LEFT | ALIGN_BASELINE);
+        label(324, 246, "АККОРД НА КЛАВИШУ (CHORD)", 9.f, Color(90, 120, 100), ALIGN_LEFT | ALIGN_BASELINE);
+        const int key = clampi((int)std::lround(fParams[pKey]), 0, 11), sc = clampi((int)std::lround(fParams[pScale]), 0, kNumScales - 1);
+        const int ch = clampi((int)std::lround(fParams[pChord]), 0, kNumChordModes - 1);
+        for (int i = 0; i < fCtlCount; ++i)
+        {
+            const Control& c = fCtl[i];
+            if (c.group != gHarmony) continue;
+            switch (c.type)
+            {
+            case ctHarmKey: chip(c, (int)c.value == key, 0x3fae6a, c.label, 12.f); break;
+            case ctHarmScale:
+            {
+                chip(c, (int)c.value == sc, 0x46a8ff, c.label, 11.f);
+                break;
+            }
+            case ctHarmChord: chip(c, (int)c.value == ch, 0xff8a3a, c.label, 11.f); break;
+            case ctHarmLock:
+            {
+                const bool on = fParams[pScaleLock] > 0.5f;
+                char b[96]; std::snprintf(b, sizeof(b), "%s SCALE LOCK \xE2\x80\x94 любая клавиша в ладу", on ? "\xE2\x9C\x93" : "\xE2\x97\x8B");
+                chip(c, on, 0x8a5cff, b, 10.5f);
+                break;
+            }
+            case ctHarmonyClose: closeButton(c); break;
+            default: break;
+            }
+        }
+        // scale name in Russian + the chords of this key
+        char line[160];
+        std::snprintf(line, sizeof(line), "%s %s (%s)", kKeyNames[key], kScales[sc].name, kScales[sc].ru);
+        label(632, 318, line, 11.f, Color(60, 80, 70), ALIGN_LEFT | ALIGN_BASELINE);
+        static const char* const roman[7] = { "I", "II", "III", "IV", "V", "VI", "VII" };
+        float x = 324;
+        for (int d = 0; d < 7; ++d)
+        {
+            const int root = 60 + key + kScales[sc].parent[d];
+            int out[5]; buildChord(root, key, sc, 1, out);
+            const int third = (out[1] - out[0] + 12) % 12, fifth = (out[2] - out[0] + 12) % 12;
+            const char* q = third == 4 ? (fifth == 8 ? "+" : "") : (fifth == 6 ? "dim" : "m");
+            bool inScale = false;
+            for (int k = 0; k < kScales[sc].n; ++k) if (kScales[sc].deg[k] == kScales[sc].parent[d]) inScale = true;
+            char b[24]; std::snprintf(b, sizeof(b), "%s%s", kKeyNames[(key + kScales[sc].parent[d]) % 12], q);
+            beginPath(); roundedRect(x, 342, 80, 30, 8); fillColor(inScale ? Color(255, 255, 255, 0.92f) : Color(240, 236, 244, 0.6f)); fill();
+            strokeWidth(1.f); strokeColor(hexc(0x3fae6a, inScale ? 0.7f : 0.25f)); stroke();
+            label(x + 40, 355, b, 12.f, inScale ? Color(40, 70, 60) : Color(150, 150, 160), ALIGN_CENTER | ALIGN_BASELINE);
+            label(x + 40, 368, roman[d], 8.5f, Color(110, 140, 120), ALIGN_CENTER | ALIGN_BASELINE);
+            x += 84;
+        }
+        label(324, 338, "аккорды лада (нажми одну клавишу с режимом TRIAD / 7TH):", 9.f, Color(90, 120, 100), ALIGN_LEFT | ALIGN_BASELINE);
+    }
+
+    // ---- TOOLS: presets, slots, packs, MIDI export
+    void drawTools()
+    {
+        beginPath(); rect(0, 0, kW, kH); fillColor(Color(16, 8, 36, 0.62f)); fill();
+        fPixelUI = false;
+        glassPanel(84, 52, 826, 450, 0x8a5cff, 16.f);
+        fillColor(hexc(0x8a5cff)); drawFlower(106, 78, 9);
+        label(122, 84, "TOOLS", 17.f, Color(60, 40, 110), ALIGN_LEFT | ALIGN_BASELINE);
+        label(190, 84, "пресеты .rnfm, слоты, паки и экспорт MIDI \xE2\x80\xA2 всё сохраняется в проекте DAW", 10.5f, Color(110, 90, 150), ALIGN_LEFT | ALIGN_BASELINE);
+        label(104, 110, "ПРЕСЕТ: ВСЕ РУЧКИ, ИНСТРУМЕНТ, БАРАБАНЫ, СЦЕНА, ТЕКСТ, ПЕСНЯ", 9.f, Color(110, 90, 150), ALIGN_LEFT | ALIGN_BASELINE);
+        label(104, 190, "8 СЛОТОВ: КЛИК \xE2\x80\x94 ЗАГРУЗИТЬ, SAVE \xE2\x80\x94 СОХРАНИТЬ ТЕКУЩИЙ ЗВУК", 9.f, Color(110, 90, 150), ALIGN_LEFT | ALIGN_BASELINE);
+        label(104, 390, "MIDI", 9.f, Color(110, 90, 150), ALIGN_LEFT | ALIGN_BASELINE);
+        std::vector<RecEvent> tk; double bpm = 0; int takeNotes = 0;
+        if (retroTakeSnapshot(getPluginInstancePointer(), tk, bpm)) for (const RecEvent& e : tk) if (e.on) ++takeNotes;
+        for (int i = 0; i < fCtlCount; ++i)
+        {
+            const Control& c = fCtl[i];
+            if (c.group != gTools) continue;
+            switch (c.type)
+            {
+            case ctSavePreset: chip(c, false, 0x8a5cff, "\xE2\x86\x93 SAVE PRESET (.rnfm)", 11.f); break;
+            case ctLoadPreset: chip(c, false, 0x8a5cff, "\xE2\x86\x91 LOAD PRESET", 11.f); break;
+            case ctExportPack: chip(c, false, 0xff5fa8, "\xE2\x87\xAA EXPORT PACK", 11.f); break;
+            case ctImportPack: chip(c, false, 0xff5fa8, "\xE2\x87\xA9 IMPORT PACK", 11.f); break;
+            case ctMidiTake:
+            {
+                char b[96]; std::snprintf(b, sizeof(b), "\xE2\x99\xAA EXPORT MIDI: МОЯ ИГРА (%d нот)", takeNotes);
+                chip(c, false, 0x46a8ff, b, 10.5f);
+                break;
+            }
+            case ctMidiSong: chip(c, false, 0xff8a3a, fSongText.empty() ? "\xE2\x99\xAB MIDI: RANDOM SONG (нет песни)" : "\xE2\x99\xAB EXPORT MIDI: RANDOM SONG", 10.5f); break;
+            case ctClearTake: chip(c, false, 0x9a8aa8, "CLEAR TAKE", 10.5f); break;
+            case ctSlotStore: break;   // drawn with the slot card
+            case ctSlot:
+            {
+                const int k = (int)c.value;
+                const PresetData& P = fSlots[k];
+                const bool hv = hover(c.b);
+                beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 10);
+                fillColor(P.valid ? (hv ? Color(250, 236, 255) : Color(255, 255, 255, 0.92f)) : Color(245, 240, 250, hv ? 0.9f : 0.6f)); fill();
+                strokeWidth(1.2f); strokeColor(hexc(0x8a5cff, P.valid ? 0.7f : 0.3f)); stroke();
+                char b[64]; std::snprintf(b, sizeof(b), "%d", k + 1);
+                beginPath(); circle(c.b.x + 16, c.b.y + 16, 10); fillColor(hexc(P.valid ? 0x8a5cff : 0xc8bcd8)); fill();
+                label(c.b.x + 16, c.b.y + 17, b, 11.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
+                std::string nm = P.valid ? P.name : std::string("пусто");
+                if (utf8len(nm.c_str()) > 16) nm = std::string(nm.c_str(), utf8advance(nm.c_str(), 15)) + "\xE2\x80\xA6";
+                label(c.b.x + 32, c.b.y + 20, nm.c_str(), 11.f, P.valid ? Color(60, 40, 90) : Color(150, 130, 170), ALIGN_LEFT | ALIGN_BASELINE);
+                if (P.valid)
+                {
+                    const int inst = clampi((int)std::lround(P.params[pInstrument]), 0, kNumInstruments - 1);
+                    label(c.b.x + 10, c.b.y + 40, eraName(eraOf(inst)), 8.5f, Color(130, 110, 160), ALIGN_LEFT | ALIGN_BASELINE);
+                }
+                // the SAVE button sits inside the card
+                for (int j = 0; j < fCtlCount; ++j)
+                    if (fCtl[j].type == ctSlotStore && (int)fCtl[j].value == k) chip(fCtl[j], false, 0xff5fa8, "SAVE", 9.f);
+                break;
+            }
+            case ctToolsClose: closeButton(c); break;
+            default: break;
+            }
+        }
+        static const char* const info[] = {
+            "\xE2\x80\xA2 .rnfm \xE2\x80\x94 обычный текст JSON: его можно открыть блокнотом, отправить другу, править вручную;",
+            "   новые ручки будущих версий не ломают старые пресеты. Пак = несколько пресетов в одном файле (для обмена и продажи).",
+            "\xE2\x80\xA2 МОЯ ИГРА \xE2\x80\x94 ноты, которые ты играл (с последнего старта Play в DAW). В режиме VOCAL в MIDI попадает и текст.",
+            "\xE2\x80\xA2 RANDOM SONG \xE2\x80\x94 три дорожки: мелодия, аккорды, бас. Перетащи .mid в DAW и дорабатывай!",
+        };
+        for (int k = 0; k < 4; ++k) label(104, 450 + k * 13.f, info[k], 9.5f, Color(100, 80, 130), ALIGN_LEFT | ALIGN_BASELINE);
+    }
+
+    // ---- METER: time signature chips above the drum panel
+    void drawMeterPopup()
+    {
+        fPixelUI = false;
+        beginPath(); roundedRect(392, 466, 538, 64, 12);
+        fillColor(Color(255, 255, 255, 0.96f)); fill();
+        strokeWidth(2.f); strokeColor(hexc(0x3fae6a)); stroke();
+        label(404, 484, "РАЗМЕР ТАКТА \xE2\x80\xA2 /4 \xE2\x80\x94 прямая сетка 16-х, /8 \xE2\x80\x94 группы по три восьмых", 9.f, Color(60, 100, 70), ALIGN_LEFT | ALIGN_BASELINE);
+        const int m = clampi((int)std::lround(fParams[pMeter]), 0, kNumMeters - 1);
+        for (int i = 0; i < fCtlCount; ++i)
+            if (fCtl[i].type == ctMeterPick) chip(fCtl[i], (int)fCtl[i].value == m, 0x3fae6a, fCtl[i].label, 11.f);
     }
 
     void drawSceneBrowser()
@@ -892,10 +1588,17 @@ private:
     {
         beginPath(); rect(0, 0, kW, kH); fillColor(Color(16, 8, 36, 0.55f)); fill();
         fPixelUI = false;
-        glassPanel(136, 60, 688, 470, 0xff5fa8, 16.f);
-        fillColor(hexc(0xff5fa8)); drawFlower(158, 86, 9);
-        label(174, 92, "STORY MODE", 17.f, Color(80, 40, 80), ALIGN_LEFT | ALIGN_BASELINE);
-        label(310, 92, "мастер-класс: героини объясняют, как всё работает", 10.5f, Color(130, 90, 130), ALIGN_LEFT | ALIGN_BASELINE);
+        glassPanel(36, 52, 888, 534, 0xff5fa8, 16.f);
+        fillColor(hexc(0xff5fa8)); drawFlower(58, 78, 9);
+        label(74, 84, "STORY MODE", 17.f, Color(80, 40, 80), ALIGN_LEFT | ALIGN_BASELINE);
+        int done = 0; for (int k = 0; k < kNumLessons; ++k) if (fLessonMask & (1u << k)) ++done;
+        char hdr[160]; std::snprintf(hdr, sizeof(hdr), "курс: от первой ноты до своей песни  \xE2\x80\xA2  пройдено %d из %d", done, kNumLessons);
+        label(210, 84, hdr, 10.5f, Color(130, 90, 130), ALIGN_LEFT | ALIGN_BASELINE);
+        // progress bar
+        beginPath(); roundedRect(600, 76, 260, 8, 4); fillColor(Color(230, 210, 230)); fill();
+        beginPath(); roundedRect(600, 76, 260.f * done / kNumLessons, 8, 4); fillPaint(linearGradient(600, 0, 860, 0, hexc(0xff5fa8), hexc(0x8a5cff))); fill();
+        static const char* const chapters[4] = { "ОСНОВЫ", "ТЕОРИЯ ДЛЯ ПЕСНИ", "ЖАНРЫ И СЦЕНЫ", "ВОКАЛ, СВЕДЕНИЕ, СВОЯ ПЕСНЯ" };
+        static const int chapterStart[4] = { 0, 3, 10, 15 };
         for (int i = 0; i < fCtlCount; ++i)
         {
             const Control& c = fCtl[i];
@@ -903,23 +1606,24 @@ private:
             const bool hv = hover(c.b);
             if (c.type == ctLesson)
             {
-                const Lesson& L = lessons()[(int)c.value];
+                const int li = (int)c.value;
+                const Lesson& L = lessons()[li];
                 const CharacterDef& H = storyHeroine(L.heroine);
-                beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 12);
-                fillColor(hv ? Color(255, 236, 246) : Color(255, 255, 255, 0.9f)); fill();
-                strokeWidth(1.5f); strokeColor(hexc(H.accent, 0.8f)); stroke();
-                drawPortrait(H, c.b.x + 6, c.b.y + 5, 70, c.b.h - 10);
-                char t[96]; std::snprintf(t, sizeof(t), "Урок %d. %s", (int)c.value + 1, L.title);
-                label(c.b.x + 92, c.b.y + 25, t, 15.f, Color(60, 40, 70), ALIGN_LEFT | ALIGN_BASELINE);
-                char d[160]; std::snprintf(d, sizeof(d), "%s  \xE2\x80\xA2  ведёт %s  \xE2\x80\xA2  %d шагов", L.desc, H.name, L.count);
-                label(c.b.x + 92, c.b.y + 45, d, 10.5f, Color(130, 100, 140), ALIGN_LEFT | ALIGN_BASELINE);
-                label(c.b.x + c.b.w - 18, c.b.y + c.b.h / 2 + 5, "\xE2\x96\xB6", 16.f, hexc(H.accent), ALIGN_RIGHT | ALIGN_BASELINE);
+                const bool ok = (fLessonMask & (1u << li)) != 0;
+                beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 10);
+                fillColor(hv ? Color(255, 236, 246) : Color(255, 255, 255, ok ? 0.75f : 0.92f)); fill();
+                strokeWidth(1.2f); strokeColor(hexc(H.accent, 0.8f)); stroke();
+                drawPortrait(H, c.b.x + 4, c.b.y + 3, 44, c.b.h - 6);
+                for (int ch = 0; ch < 4; ++ch)
+                    if (chapterStart[ch] == li) label(c.b.x + c.b.w - 34, c.b.y + 12, chapters[ch], 7.5f, hexc(0xff5fa8, 0.95f), ALIGN_RIGHT | ALIGN_BASELINE);
+                char t[128]; std::snprintf(t, sizeof(t), "%d. %s", li + 1, L.title);
+                label(c.b.x + 56, c.b.y + 19, t, 12.5f, Color(60, 40, 70), ALIGN_LEFT | ALIGN_BASELINE);
+                char d[200]; std::snprintf(d, sizeof(d), "%s \xE2\x80\xA2 %s \xE2\x80\xA2 %d шагов", L.desc, H.name, L.count);
+                label(c.b.x + 56, c.b.y + 35, d, 9.f, Color(130, 100, 140), ALIGN_LEFT | ALIGN_BASELINE);
+                if (ok) { beginPath(); circle(c.b.x + c.b.w - 18, c.b.y + c.b.h / 2 + 3, 9); fillColor(hexc(0x3fae6a)); fill(); label(c.b.x + c.b.w - 18, c.b.y + c.b.h / 2 + 4, "\xE2\x9C\x93", 11.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE); }
+                else label(c.b.x + c.b.w - 14, c.b.y + c.b.h / 2 + 8, "\xE2\x96\xB6", 13.f, hexc(H.accent), ALIGN_RIGHT | ALIGN_BASELINE);
             }
-            else
-            {
-                beginPath(); circle(c.b.x + 14, c.b.y + 14, 13); fillColor(hv ? Color(255, 120, 160) : Color(230, 180, 200)); fill();
-                label(c.b.x + 14, c.b.y + 15, c.label, 14.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
-            }
+            else closeButton(c);
         }
     }
 
@@ -1091,23 +1795,34 @@ private:
     {
         glassPanel(16, 56, 244, 390, I.accent);
         panelTitle(28, 72, "IDOLS", I.accent);
+        drawHeaderActions(I.accent);
         const int cur = clampi((int)std::lround(fParams[pIdol]), 0, kNumIdols - 1);
+        const int vt = currentVoiceType();
         for (int i = 0; i < fCtlCount; ++i)
         {
             const Control& c = fCtl[i];
+            if (c.type == ctVoiceType)
+            {
+                const bool sel = (int)c.value == vt;
+                pill(c.b, sel, hover(c.b), I.accent, 10.f);
+                label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, c.label, 9.5f, sel ? Color(255, 255, 255) : Color(80, 50, 90), ALIGN_CENTER | ALIGN_MIDDLE);
+                continue;
+            }
             if (c.type != ctIdol) continue;
             const int k = (int)c.value;
             const CharacterDef& D = kIdols[k];
             const bool sel = k == cur;
             pill(c.b, sel, hover(c.b), D.accent, 14.f);
             // tiny portrait: hair colour circle with eyes
-            beginPath(); circle(c.b.x + 27, c.b.y + 27, 20); fillColor(hexc(D.hair)); fill(); strokeWidth(1.5f); strokeColor(hexc(D.hairDark)); stroke();
-            beginPath(); ellipse(c.b.x + 27, c.b.y + 32, 13, 12); fillColor(Color(255, 236, 224)); fill();
-            beginPath(); ellipse(c.b.x + 22, c.b.y + 32, 2.5f, 3.5f); ellipse(c.b.x + 32, c.b.y + 32, 2.5f, 3.5f); fillColor(hexc(D.eye)); fill();
+            const float cy = c.b.y + c.b.h / 2;
+            beginPath(); circle(c.b.x + 24, cy, 17); fillColor(hexc(D.hair)); fill(); strokeWidth(1.5f); strokeColor(hexc(D.hairDark)); stroke();
+            beginPath(); ellipse(c.b.x + 24, cy + 4, 11, 10); fillColor(Color(255, 236, 224)); fill();
+            beginPath(); ellipse(c.b.x + 20, cy + 4, 2.2f, 3.f); ellipse(c.b.x + 28, cy + 4, 2.2f, 3.f); fillColor(hexc(D.eye)); fill();
             char nm[64]; std::snprintf(nm, sizeof(nm), "%s %s", D.name, D.male ? "\xE2\x99\x82" : "\xE2\x99\x80");
-            label(c.b.x + 56, c.b.y + 24, nm, 15.f, sel ? Color(255, 255, 255) : Color(60, 40, 80), ALIGN_LEFT | ALIGN_BASELINE);
-            label(c.b.x + 56, c.b.y + 42, D.role, 10.5f, sel ? Color(255, 255, 255, 0.9f) : Color(120, 90, 140), ALIGN_LEFT | ALIGN_BASELINE);
+            label(c.b.x + 48, c.b.y + 18, nm, 13.5f, sel ? Color(255, 255, 255) : Color(60, 40, 80), ALIGN_LEFT | ALIGN_BASELINE);
+            label(c.b.x + 48, c.b.y + 32, D.role, 9.5f, sel ? Color(255, 255, 255, 0.9f) : Color(120, 90, 140), ALIGN_LEFT | ALIGN_BASELINE);
         }
+        label(30, 357, "ТИПАЖ ГОЛОСА", 9.f, Color(120, 80, 130), ALIGN_LEFT | ALIGN_BASELINE);
     }
 
     void drawLyricsBox(const CharacterDef& I)
@@ -1269,8 +1984,120 @@ private:
         beginPath(); ellipse(x + 2 * s, y - 22 * s, 26 * s, 10 * s); fill();
     }
 
+    // REIWA era: neon city at night - glowing signs, a synthwave sun and a wet street that reflects everything
+    void drawNeonScene(const CharacterDef& C)
+    {
+        const float beat = fParams[pOutBeat];
+        beginPath(); rect(-40, -40, kW + 80, kH + 80);
+        fillPaint(linearGradient(0, 0, 0, 430, hexc(C.skyTop), hexc(C.skyBottom))); fill();
+        // stars
+        save(); layer(3.f);
+        for (int i = 0; i < 70; ++i)
+        {
+            const float x = hash01(i * 3 + 1) * kW, y = hash01(i * 3 + 2) * 200.f;
+            const float tw = fExport ? 1.f : 0.4f + 0.6f * std::sin(fT * (1.0f + hash01(i) * 2.f) + i);
+            beginPath(); circle(x, y, 0.7f + hash01(i * 7) * 1.2f); fillColor(Color(255, 240, 255, 0.7f * tw)); fill();
+        }
+        // big striped retro sun
+        const float sx = 560, sy = 175, sr = 100;
+        beginPath(); circle(sx, sy, sr + 70);
+        fillPaint(radialGradient(sx, sy, sr * 0.6f, sr + 70, hexc(C.accent, 0.45f), hexc(C.accent, 0.f))); fill();
+        save();
+        scissor(sx - sr, sy - sr, sr * 2, sr * 1.2f);
+        beginPath(); circle(sx, sy, sr);
+        fillPaint(linearGradient(0, sy - sr, 0, sy + sr * 0.2f, Color(255, 236, 120), hexc(C.accent))); fill();
+        resetScissor();
+        restore();
+        for (int k = 0; k < 6; ++k)
+        {
+            const float y = sy - 10 + k * 13.f + std::fmod(fExport ? 0.f : fT * 6.f, 13.f) * 0.3f;
+            beginPath(); rect(sx - sr - 2, y, sr * 2 + 4, 2.5f + k * 1.1f); fillColor(hexc(C.skyBottom)); fill();
+        }
+        restore();
+        // far skyline silhouettes
+        save(); layer(9.f);
+        for (int i = 0; i < 30; ++i)
+        {
+            const float bw = 24 + hash01(i + 400) * 40, bh = 60 + hash01(i + 420) * 150;
+            const float bx = i * 34.f - 50;
+            beginPath(); rect(bx, 380 - bh, bw, bh + 40); fillColor(mixc(C.horizon, 0x0a0618, 0.55f, 0.95f)); fill();
+            for (int w = 0; w < 12; ++w)
+            {
+                const float wx = bx + 4 + (w % 3) * (bw * 0.28f), wy = 380 - bh + 8 + (w / 3) * 14;
+                if (wy > 372) break;
+                if (hash01(i * 17 + w) > 0.55f) { beginPath(); rect(wx, wy, 4, 6); fillColor(Color(255, 220, 255, 0.55f)); fill(); }
+            }
+        }
+        restore();
+        // near buildings with neon signs
+        save(); layer(15.f);
+        static const uint32_t neon[5] = { 0xff4fbf, 0x46d0ff, 0xb8ff2a, 0xffc83a, 0xb07cff };
+        static const char* const signs[6] = { "KARAOKE", "GAME", "CAFE", "24H", "ARCADE", "MUSIC" };
+        for (int i = 0; i < 8; ++i)
+        {
+            const float bx = -30 + i * 130.f + hash01(i + 500) * 30, bw = 90 + hash01(i + 510) * 40, bh = 170 + hash01(i + 520) * 140;
+            if (bx > 300 && bx < 560) continue;   // keep the middle open for the heroine
+            beginPath(); rect(bx, 420 - bh, bw, bh + 60); fillColor(mixc(C.horizon, 0x06040e, 0.7f)); fill();
+            const uint32_t col = neon[i % 5];
+            const float flick = (fExport || hash01(i + (int)(fT * 3.f)) > 0.04f) ? 1.f : 0.3f;
+            // vertical sign with glow
+            const float nx = bx + bw - 22, ny = 420 - bh + 20, nh = std::fmin(150.f, bh - 60);
+            beginPath(); roundedRect(nx - 8, ny - 8, 30, nh + 16, 8); fillPaint(boxGradient(nx, ny, 14, nh, 6, 14, hexc(col, 0.55f * flick), hexc(col, 0.f))); fill();
+            beginPath(); roundedRect(nx, ny, 14, nh, 3); strokeWidth(2.f); strokeColor(hexc(col, flick)); stroke();
+            for (int k = 0; k < 5 && k * 26 < nh - 10; ++k) { beginPath(); circle(nx + 7, ny + 14 + k * 26.f, 4); fillColor(hexc(col, 0.85f * flick)); fill(); }
+            // horizontal sign
+            const char* t = signs[i % 6];
+            const float hy = 420 - bh * 0.55f;
+            beginPath(); roundedRect(bx + 8, hy - 14, bw - 40, 26, 6); fillColor(Color(10, 6, 20, 0.85f)); fill();
+            strokeWidth(1.5f); strokeColor(hexc(neon[(i + 2) % 5], 0.9f)); stroke();
+            outlinedLabel(bx + 8 + (bw - 40) / 2, hy + 5, t, 12.f, Color(255, 255, 255, 0.95f), hexc(neon[(i + 2) % 5], 0.8f * flick), ALIGN_CENTER | ALIGN_BASELINE, 1.4f);
+        }
+        restore();
+        // street: wet asphalt with reflections and a perspective grid
+        save(); layer(22.f);
+        beginPath(); rect(-60, 420, kW + 120, 300);
+        fillPaint(linearGradient(0, 420, 0, 660, mixc(C.skyBottom, 0x100820, 0.6f), Color(8, 6, 16))); fill();
+        strokeWidth(1.f);
+        for (int k = 0; k < 16; ++k)
+        {
+            const float x = -400 + k * 115.f;
+            beginPath(); moveTo(480 + (x - 480) * 0.15f, 420); lineTo(x, 680); strokeColor(hexc(C.accent, 0.22f)); stroke();
+        }
+        for (int k = 0; k < 9; ++k)
+        {
+            const float ph = std::fmod(k / 9.f + (fExport ? 0.f : fT * 0.12f), 1.f);
+            const float y = 420 + ph * ph * 260;
+            beginPath(); moveTo(-60, y); lineTo(kW + 60, y); strokeColor(hexc(C.accent, 0.08f + 0.25f * ph)); stroke();
+        }
+        // neon reflections
+        for (int i = 0; i < 8; ++i)
+        {
+            const float rx = -30 + i * 130.f + 60;
+            if (rx > 330 && rx < 610) continue;
+            beginPath(); rect(rx, 424, 10, 90 + hash01(i) * 50);
+            fillPaint(linearGradient(0, 424, 0, 560, hexc(neon[i % 5], 0.35f), hexc(neon[i % 5], 0.f))); fill();
+        }
+        restore();
+        // drifting hearts / sparkles that pulse with the beat
+        if (!fExport)
+            for (int i = 0; i < 26; ++i)
+            {
+                const float x = std::fmod(hash01(i + 700) * (kW + 100) + fT * (8 + hash01(i) * 12), kW + 100) - 50;
+                const float y = 460 - std::fmod(hash01(i + 720) * 460 + fT * (14 + hash01(i + 9) * 16), 460.f);
+                const float a = 0.35f + 0.4f * beat;
+                const uint32_t col = neon[i % 5];
+                if (i % 3 == 0) { beginPath(); circle(x - 3, y, 3.2f); circle(x + 3, y, 3.2f); moveTo(x - 6.2f, y + 1); lineTo(x, y + 8); lineTo(x + 6.2f, y + 1); fillColor(hexc(col, a)); fill(); }
+                else { beginPath(); rect(x - 0.8f, y - 4, 1.6f, 8); rect(x - 4, y - 0.8f, 8, 1.6f); fillColor(hexc(col, a + 0.2f)); fill(); }
+            }
+        // vignette
+        beginPath(); rect(0, 0, kW, kH);
+        fillPaint(radialGradient(kW / 2, kH / 2, 300, 720, Color(0, 0, 0, 0.f), Color(10, 0, 30, 0.45f)));
+        fill();
+    }
+
     void drawScene(const CharacterDef& C, float /*a*/)
     {
+        if (C.ce == ceNeon) { drawNeonScene(C); return; }
         const bool night = C.ce == ceMoon || C.ce == ceRedMoon;
         // sky
         beginPath(); rect(-40, -40, kW + 80, kH + 80);
@@ -2326,47 +3153,58 @@ private:
         beginPath(); rect(0, 0, kW, 46);
         fillPaint(linearGradient(0, 0, 0, 46, Color(255, 255, 255, 0.85f), Color(255, 235, 245, 0.75f))); fill();
         beginPath(); rect(0, 45, kW, 2); fillColor(hexc(C.accent, 0.8f)); fill();
-        fillColor(hexc(C.accent)); drawFlower(26, 23, 13);
-        outlinedLabel(48, 31, "RETRO NOVEL FM", 22.f, hexc(C.accent), Color(255, 255, 255), ALIGN_LEFT | ALIGN_BASELINE, 2.f);
-        {
-            const int ci = clampi((int)std::lround(fParams[pInstrument]), 0, kNumInstruments - 1);
-            static const char* const eras[3] = { "\xE2\x99\xAA PC-98 / 90s FM", "\xE2\x99\xAA Windows XP / 2000s VN", "\xE2\x99\xAA My samples" };
-            (void)ci; (void)eras;
-        }
+        fillColor(hexc(C.accent)); drawFlower(24, 23, 12);
+        outlinedLabel(42, 30, "RETRO NOVEL FM", 19.f, hexc(C.accent), Color(255, 255, 255), ALIGN_LEFT | ALIGN_BASELINE, 2.f);
 
         for (int i = 0; i < fCtlCount; ++i)
         {
             const Control& c = fCtl[i];
-            if (c.type == ctScenesOpen || c.type == ctStoryOpen)
+            if (c.group != gAlways || c.b.y > 30) continue;
+            const bool hv = hover(c.b);
+            bool on = false; const char* t = c.label; char buf[96];
+            uint32_t g0 = 0xffb347, g1 = 0xff5fa8;
+            switch (c.type)
             {
-                const bool on = c.type == ctScenesOpen ? fParams[pScene] > 0.5f : fStory >= 0, hv = hover(c.b);
-                beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 13);
-                if (on) fillPaint(linearGradient(c.b.x, 0, c.b.x + c.b.w, 0, hexc(0xffb347), hexc(0xff5fa8)));
-                else fillColor(hv ? Color(255, 230, 242) : Color(255, 255, 255, 0.9f));
-                fill(); strokeWidth(1.5f); strokeColor(on ? Color(255, 255, 255) : hexc(C.accent, 0.8f)); stroke();
-                const char* t = c.type == ctScenesOpen ? "\xE2\x9C\xA6 SCENES" : "\xE2\x98\x85 STORY";
-                label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, t, 12.f, on ? Color(255, 255, 255) : hexc(C.accent), ALIGN_CENTER | ALIGN_MIDDLE);
-                continue;
-            }
-            if (c.type == ctToggle && c.param == pVocalMode)
+            case ctScenesOpen: on = fParams[pScene] > 0.5f; t = "\xE2\x9C\xA6 SCENES"; break;
+            case ctStoryOpen: on = fStory >= 0; t = "\xE2\x98\x85 STORY"; break;
+            case ctToolsOpen: on = fToolsOpen; t = "\xE2\x9A\x99 TOOLS"; g0 = 0x8a5cff; g1 = 0x46a8ff; break;
+            case ctToggle: on = fParams[pVocalMode] > 0.5f; t = on ? "\xE2\x99\xAB VOCAL" : "\xE2\x99\xAA VOCAL"; g0 = 0xff5fa8; g1 = 0x46a8ff; break;
+            case ctHarmonyOpen:
             {
-                const bool on = fParams[pVocalMode] > 0.5f, hv = hover(c.b);
-                beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 13);
-                if (on) fillPaint(linearGradient(c.b.x, 0, c.b.x + c.b.w, 0, hexc(0xff5fa8), hexc(0x46a8ff)));
-                else fillColor(hv ? Color(255, 230, 242) : Color(255, 255, 255, 0.9f));
-                fill(); strokeWidth(1.5f); strokeColor(on ? Color(255, 255, 255) : hexc(C.accent, 0.8f)); stroke();
-                label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, on ? "\xE2\x99\xAB VOCAL" : "\xE2\x99\xAA VOCAL", 12.f, on ? Color(255, 255, 255) : hexc(C.accent), ALIGN_CENTER | ALIGN_MIDDLE);
-                continue;
+                const int k = clampi((int)std::lround(fParams[pKey]), 0, 11), sc = clampi((int)std::lround(fParams[pScale]), 0, kNumScales - 1);
+                const int ch = clampi((int)std::lround(fParams[pChord]), 0, kNumChordModes - 1);
+                on = fHarmonyOpen || ch > 0 || fParams[pScaleLock] > 0.5f;
+                std::snprintf(buf, sizeof(buf), "\xE2\x99\xAB %s %s%s%s", kKeyNames[k], kScales[sc].name, ch > 0 ? " \xC2\xB7 " : "", ch > 0 ? kChordModeNames[ch] : "");
+                t = buf; g0 = 0x3fae6a; g1 = 0x46a8ff;
+                break;
             }
+            case ctSongGen: t = "\xE2\x9A\x84 RANDOM SONG"; g0 = 0xff8a3a; g1 = 0xff4f8b; on = false; break;
+            case ctSongToggle: on = fParams[pSongPlay] > 0.5f && !fSongText.empty(); t = on ? "\xE2\x96\xA0" : "\xE2\x96\xB6"; g0 = 0xff8a3a; g1 = 0xff4f8b; break;
+            default: continue;
+            }
+            beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 13);
+            if (on || c.type == ctSongGen) fillPaint(linearGradient(c.b.x, 0, c.b.x + c.b.w, 0, hexc(g0, hv ? 1.f : 0.92f), hexc(g1, hv ? 1.f : 0.92f)));
+            else fillColor(hv ? Color(255, 230, 242) : Color(255, 255, 255, 0.9f));
+            fill(); strokeWidth(1.5f); strokeColor(on || c.type == ctSongGen ? Color(255, 255, 255) : hexc(C.accent, 0.8f)); stroke();
+            label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, t, c.type == ctHarmonyOpen ? 10.5f : 11.5f, on || c.type == ctSongGen ? Color(255, 255, 255) : hexc(C.accent), ALIGN_CENTER | ALIGN_MIDDLE);
+        }
+        label(944, 28, "v8.0", 10.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
+    }
+
+    // small round arrows in a panel header (instrument / idol browsing)
+    void drawHeaderActions(uint32_t accent)
+    {
+        for (int i = 0; i < fCtlCount; ++i)
+        {
+            const Control& c = fCtl[i];
             if (c.type != ctAction) continue;
             const bool h = hover(c.b);
-            beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 13);
-            fillPaint(linearGradient(0, c.b.y, 0, c.b.y + c.b.h, hexc(C.accent, h ? 1.f : 0.85f), mixc(C.accent, 0x803060, 0.3f)));
+            beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 10);
+            fillPaint(linearGradient(0, c.b.y, 0, c.b.y + c.b.h, hexc(accent, h ? 1.f : 0.85f), mixc(accent, 0x803060, 0.3f)));
             fill();
-            strokeWidth(1.5f); strokeColor(Color(255, 255, 255, 0.9f)); stroke();
-            label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, c.label, 13.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
+            strokeWidth(1.f); strokeColor(Color(255, 255, 255, 0.9f)); stroke();
+            label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, c.label, c.value == aRandom ? 13.f : 10.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
         }
-        label(940, 30, "v7.0", 11.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
     }
 
     void pill(const Box& b, bool sel, bool hv, uint32_t accent, float r = 11.f)
@@ -2382,20 +3220,41 @@ private:
     {
         glassPanel(16, 56, 244, 390, 0xff7fae);
         panelTitle(28, 72, "INSTRUMENT", 0xff7fae);
+        drawHeaderActions(fEraTab == eraReiwa ? 0xb84fff : 0xff7fae);
         const int cur = clampi((int)std::lround(fParams[pInstrument]), 0, kNumInstruments - 1);
         char buf[64];
+        if (fEraTab == eraXP && fXPPage == 1)
+        {
+            label(30, 142, "\xE2\x9C\x9D ХОРРОР", 10.5f, Color(150, 30, 60), ALIGN_LEFT | ALIGN_BASELINE);
+            label(30, 296, "\xE2\x9C\x8E ШКОЛА", 10.5f, Color(40, 110, 170), ALIGN_LEFT | ALIGN_BASELINE);
+            beginPath(); rect(96, 138, 150, 1); rect(88, 292, 158, 1); fillColor(Color(160, 120, 170, 0.5f)); fill();
+        }
         for (int i = 0; i < fCtlCount; ++i)
         {
             const Control& c = fCtl[i];
             if (c.type == ctEraTab)
             {
                 const bool sel = fEraTab == (int)c.value;
-                pill(c.b, sel, hover(c.b), 0xff7fae, 8.f);
-                label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, c.label, 9.5f, sel ? Color(255, 255, 255) : Color(80, 50, 90), ALIGN_CENTER | ALIGN_MIDDLE);
-                if (eraOf(cur) == (int)c.value && !sel) { beginPath(); circle(c.b.x + c.b.w - 6, c.b.y + 5, 3); fillColor(hexc(0xff4f8b)); fill(); }
+                const bool rw = (int)c.value == eraReiwa;
+                if (rw && sel)
+                {
+                    beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 8);
+                    fillPaint(linearGradient(c.b.x, 0, c.b.x + c.b.w, 0, hexc(0xff4fbf), hexc(0x46d0ff))); fill();
+                    strokeWidth(1.f); strokeColor(Color(255, 255, 255)); stroke();
+                }
+                else pill(c.b, sel, hover(c.b), rw ? 0xb84fff : 0xff7fae, 8.f);
+                label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, c.label, 8.5f, sel ? Color(255, 255, 255) : (rw ? Color(130, 40, 170) : Color(80, 50, 90)), ALIGN_CENTER | ALIGN_MIDDLE);
+                if (eraOf(cur) == (int)c.value && !sel) { beginPath(); circle(c.b.x + c.b.w - 5, c.b.y + 5, 3); fillColor(hexc(0xff4f8b)); fill(); }
                 continue;
             }
-            if (!visible(c) || (c.group != gFM && c.group != gXP && c.group != gUser && c.group != gRock)) continue;
+            if (c.type == ctXPPage && shown(c))
+            {
+                const bool sel = fXPPage == (int)c.value;
+                pill(c.b, sel, hover(c.b), (int)c.value ? 0x8a3a6a : 0xff7fae, 9.f);
+                label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, c.label, 8.5f, sel ? Color(255, 255, 255) : Color(80, 50, 90), ALIGN_CENTER | ALIGN_MIDDLE);
+                continue;
+            }
+            if (!shown(c) || (c.group != gFM && c.group != gXP && c.group != gXP2 && c.group != gUser && c.group != gRock && c.group != gReiwa)) continue;
             if (c.type == ctSelect)
             {
                 const int idx = (int)c.value;
@@ -2405,6 +3264,7 @@ private:
                 beginPath(); circle(c.b.x + 11, c.b.y + c.b.h / 2, c.b.h < 21 ? 4.f : 5.f);
                 fillColor(hexc(hc.hair)); fill(); strokeWidth(1.f); strokeColor(hexc(hc.hairDark)); stroke();
                 label(c.b.x + 21, c.b.y + c.b.h / 2 + 1, c.label, c.b.h < 21 ? 10.5f : 11.5f, sel ? Color(255, 255, 255) : Color(80, 50, 90), ALIGN_LEFT | ALIGN_MIDDLE);
+                if (idx >= kFirstXP2 && idx < kFirstNeo && c.group == gXP2) { beginPath(); circle(c.b.x + c.b.w - 9, c.b.y + c.b.h / 2, 3); fillColor(hexc(0xffc83a)); fill(); }
                 if (c.group == gUser)
                 {
                     const int k = idx - kFirstUser;
@@ -2468,12 +3328,32 @@ private:
         label(cx, cy + r + 30, buf, 10.f, Color(150, 110, 160), ALIGN_CENTER | ALIGN_BASELINE);
     }
 
+    // compact knob for the drum row: dial on the left, name and value on the right
+    void drawMiniKnob(const Control& c, uint32_t accent)
+    {
+        const float cx = c.b.x + 13, cy = c.b.y + c.b.h / 2, r = 10.f;
+        const float v = norm(c.param);
+        const float a0 = 0.75f * kPi, a1 = 2.25f * kPi, av = a0 + (a1 - a0) * v;
+        const bool h = hover(c.b) || (fDrag >= 0 && &fCtl[fDrag] == &c);
+        beginPath(); roundedRect(c.b.x, c.b.y + 2, c.b.w, c.b.h - 4, 12); fillColor(h ? Color(255, 236, 246, 0.95f) : Color(255, 255, 255, 0.8f)); fill();
+        strokeWidth(1.f); strokeColor(hexc(accent, 0.45f)); stroke();
+        beginPath(); circle(cx, cy, r); fillPaint(radialGradient(cx - 3, cy - 4, 1, r * 1.4f, Color(255, 255, 255), Color(236, 224, 244))); fill();
+        lineCap(ROUND);
+        beginPath(); arc(cx, cy, r + 2.5f, a0, a1, CW); strokeWidth(2.5f); strokeColor(Color(200, 190, 215, 0.7f)); stroke();
+        if (v > 0.001f) { beginPath(); arc(cx, cy, r + 2.5f, a0, av, CW); strokeWidth(2.5f); strokeColor(hexc(accent)); stroke(); }
+        beginPath(); moveTo(cx + std::cos(av) * r * 0.3f, cy + std::sin(av) * r * 0.3f); lineTo(cx + std::cos(av) * r * 0.85f, cy + std::sin(av) * r * 0.85f);
+        strokeWidth(2.f); strokeColor(hexc(accent)); stroke();
+        label(c.b.x + 30, c.b.y + 13, c.label, 8.5f, Color(110, 70, 120), ALIGN_LEFT | ALIGN_BASELINE);
+        char buf[16]; std::snprintf(buf, sizeof(buf), "%d%%", (int)std::lround(fParams[c.param] * 100));
+        label(c.b.x + 30, c.b.y + 24, buf, 9.5f, Color(70, 40, 90), ALIGN_LEFT | ALIGN_BASELINE);
+    }
+
     void drawSoundPanel(const CharacterDef& C)
     {
         glassPanel(700, 56, 244, 390, C.accent);
         panelTitle(712, 72, fParams[pVocalMode] > 0.5f ? "VOICE" : "SOUND", C.accent);
         for (int i = 0; i < fCtlCount; ++i)
-            if (fCtl[i].type == ctKnob && fCtl[i].param != pDrumVolume && visible(fCtl[i])) drawKnob(fCtl[i], C.accent);
+            if (fCtl[i].type == ctKnob && fCtl[i].param != pDrumVolume && fCtl[i].param != pSwing && fCtl[i].param != pHumanize && shown(fCtl[i])) drawKnob(fCtl[i], C.accent);
     }
 
     void drawTextbox(const CharacterDef& C, int inst)
@@ -2533,6 +3413,7 @@ private:
         const int pat = clampi((int)std::lround(fParams[pDrumPattern]), 0, kNumPatterns - 1);
         const int genre = clampi((int)std::lround(fParams[pDrumGenre]), 0, kNumGenres - 1);
         const int kit = clampi((int)std::lround(fParams[pDrumKit]), 0, kNumKits - 1);
+        const EffPattern eff = effPat(pat);
         // kit name between the arrows
         {
             Box kb; kb.x = 306; kb.y = 552; kb.w = 112; kb.h = 24;
@@ -2544,8 +3425,9 @@ private:
         for (int i = 0; i < fCtlCount; ++i)
         {
             const Control& c = fCtl[i];
-            if (c.group == gEditor || !visible(c)) continue;
-            const bool drumCtl = c.param == pDrumMode || c.param == pDrumKit || c.param == pDrumPattern || c.param == pDrumFill || c.param == pDrumGenre;
+            if (c.group == gEditor || !shown(c)) continue;
+            const bool drumCtl = c.param == pDrumMode || c.param == pDrumKit || c.param == pDrumPattern || c.param == pDrumFill || c.param == pDrumGenre || c.type == ctMeterOpen;
+            if (c.type == ctKnob && (c.param == pSwing || c.param == pHumanize)) { drawMiniKnob(c, C.accent); continue; }
             if (!drumCtl || c.type == ctKnob) continue;
             bool sel = false;
             const char* text = c.label;
@@ -2557,7 +3439,15 @@ private:
             case ctToggle: sel = fParams[c.param] > 0.5f; std::snprintf(buf, sizeof(buf), "%s %s", sel ? "\xE2\x9C\x93" : "\xE2\x97\x8B", c.label); text = buf; break;
             case ctEditOpen: sel = fEditor; break;
             case ctKitStep: break;
-            case ctGenre: sel = (int)c.value == genre; fs = 8.5f; acc = 0xff8a3a; break;
+            case ctMeterOpen:
+            {
+                const int m = clampi((int)std::lround(fParams[pMeter]), 0, kNumMeters - 1);
+                sel = fMeterOpen || m > 0;
+                std::snprintf(buf, sizeof(buf), "\xE2\x99\xA9 %s", m > 0 ? kMeters[m].name : (eff.triplet ? "AUTO 12/8" : (eff.len == 12 ? "AUTO 3/4" : "AUTO 4/4")));
+                text = buf; fs = 9.5f; acc = 0x3fae6a;
+                break;
+            }
+            case ctGenre: sel = (int)c.value == genre; fs = 8.f; acc = (int)c.value == 9 ? 0xb84fff : 0xff8a3a; break;
             case ctGenrePat:
             {
                 const int pt = kGenres[genre].pats[(int)c.value];
@@ -2571,37 +3461,36 @@ private:
             }
             pill(c.b, sel, hover(c.b), acc);
             label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, text, fs,
-                  sel ? Color(255, 255, 255) : (acc == 0x8a5cff ? Color(90, 50, 150) : (acc == 0xff8a3a ? Color(150, 70, 30) : Color(80, 50, 90))), ALIGN_CENTER | ALIGN_MIDDLE);
+                  sel ? Color(255, 255, 255) : (acc == 0x8a5cff ? Color(90, 50, 150) : (acc == 0xff8a3a ? Color(150, 70, 30) : (acc == 0xb84fff ? Color(120, 40, 160) : (acc == 0x3fae6a ? Color(30, 100, 60) : Color(80, 50, 90))))), ALIGN_CENTER | ALIGN_MIDDLE);
         }
 
-        // step view: kick / snare+clap+rim / hats
+        // step view: kick / snare+clap+rim / hats (the bar as it sounds in the chosen meter)
         const int step = (int)std::lround(fParams[pOutDrumStep]);
-        const int len = patLen(pat);
-        const float gx = 606, gy = 588, cw = 16.f, chh = 14.f;
+        const int len = clampi(eff.len, 1, kMaxSteps);
+        const float gx = 606, gy = 588, cw = 256.f / (float)std::max(16, len), chh = 14.f;
         static const char* const rows[3] = { "K", "S", "H" };
         for (int r = 0; r < 3; ++r)
         {
             label(gx - 6, gy + r * (chh + 3) + chh / 2 + 1, rows[r], 9.f, Color(110, 80, 120), ALIGN_RIGHT | ALIGN_MIDDLE);
-            for (int s2 = 0; s2 < 16; ++s2)
+            const int cells = std::max(16, len);
+            for (int s2 = 0; s2 < cells; ++s2)
             {
                 const float cx = gx + s2 * cw, cy = gy + r * (chh + 3);
                 float v = 0;
                 if (s2 < len)
                 {
-                    if (r == 0) v = stepVel(patStep(pat, dKick, s2));
-                    else if (r == 1) v = std::fmax(stepVel(patStep(pat, dSnare, s2)), std::fmax(stepVel(patStep(pat, dClap, s2)), stepVel(patStep(pat, dRim, s2))));
-                    else v = std::fmax(stepVel(patStep(pat, dCHat, s2)), stepVel(patStep(pat, dOHat, s2)));
+                    if (r == 0) v = stepVel(eff.lane[dKick][s2]);
+                    else if (r == 1) v = std::fmax(stepVel(eff.lane[dSnare][s2]), std::fmax(stepVel(eff.lane[dClap][s2]), stepVel(eff.lane[dRim][s2])));
+                    else v = std::fmax(stepVel(eff.lane[dCHat][s2]), stepVel(eff.lane[dOHat][s2]));
                 }
-                beginPath(); roundedRect(cx + 1, cy, cw - 2, chh, 3);
+                beginPath(); roundedRect(cx + 0.5f, cy, cw - 1.5f, chh, cw > 12 ? 3.f : 2.f);
                 if (s2 >= len) fillColor(Color(200, 190, 210, 0.25f));
                 else if (v > 0) fillColor(hexc(C.accent, (mode > 0 ? 0.35f : 0.2f) + 0.6f * v * (mode > 0 ? 1.f : 0.5f)));
-                else fillColor(Color(255, 255, 255, 0.55f));
+                else fillColor((s2 / eff.beatLen) % 2 ? Color(255, 255, 255, 0.55f) : Color(236, 228, 246, 0.7f));
                 fill();
                 if (s2 == step && mode > 0) { strokeWidth(2.f); strokeColor(Color(90, 40, 110)); stroke(); }
             }
         }
-        const char* hint = mode == 0 ? "Drums off: choose SYNC or ALWAYS" : (mode == 1 ? "Plays when the DAW is playing" : "Plays all the time");
-        label(592, 569, hint, 9.f, Color(120, 90, 130), ALIGN_LEFT | ALIGN_BASELINE);
 
         for (int i = 0; i < fCtlCount; ++i) if (fCtl[i].param == pDrumVolume && fCtl[i].type == ctKnob) drawKnob(fCtl[i], C.accent, true);
     }
@@ -2610,7 +3499,7 @@ private:
     {
         // dim everything behind
         beginPath(); rect(0, 0, kW, kH); fillColor(Color(20, 10, 40, 0.45f)); fill();
-        glassPanel(140, 60, 680, 392, 0x8a5cff, 16.f);
+        glassPanel(140, 60, 750, 392, 0x8a5cff, 16.f);
         fillColor(hexc(0x8a5cff)); drawFlower(160, 80, 9);
         label(176, 86, "DRUM EDITOR", 16.f, Color(70, 40, 110), ALIGN_LEFT | ALIGN_BASELINE);
         label(300, 86, "свои барабанные партии \xE2\x80\xA2 сохраняются в проекте", 10.5f, Color(120, 90, 150), ALIGN_LEFT | ALIGN_BASELINE);
@@ -2618,6 +3507,8 @@ private:
         const int u = fEditUser;
         const int pat = clampi((int)std::lround(fParams[pDrumPattern]), 0, kNumPatterns - 1);
         const int step = (int)std::lround(fParams[pOutDrumStep]);
+        const EffPattern ue = effPat(kFirstUserPattern + u);
+        updateEditorCells();
         const int mode = (int)std::lround(fParams[pDrumMode]);
         char buf[64];
         for (int i = 0; i < fCtlCount; ++i)
@@ -2639,22 +3530,29 @@ private:
                 const bool sel = c.type == ctEditUser && (int)c.value == u;
                 pill(c.b, sel, hv, 0x8a5cff);
                 const char* t = c.label;
-                if (c.type == ctEditLen) { std::snprintf(buf, sizeof(buf), "%d STEPS", fULen[u]); t = buf; }
+                if (c.type == ctEditLen)
+                {
+                    const int meter = clampi((int)std::lround(fParams[pMeter]), 0, kNumMeters - 1);
+                    if (meter > 0) std::snprintf(buf, sizeof(buf), "%d \xE2\x80\xA2 %s", kMeters[meter].steps, kMeters[meter].name);
+                    else std::snprintf(buf, sizeof(buf), "%d STEPS", fULen[u]);
+                    t = buf;
+                }
                 if (c.type == ctEditCopy) { std::snprintf(buf, sizeof(buf), "COPY \xE2\x86\x90 %s", kPatterns[presetSlot(isUserPattern(fLastPreset) ? 0 : fLastPreset)].name); t = buf; }
                 label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, t, 10.5f, sel ? Color(255, 255, 255) : Color(70, 40, 110), ALIGN_CENTER | ALIGN_MIDDLE);
                 break;
             }
             case ctCell:
             {
-                const int lane = (int)c.value / 16, st = (int)c.value % 16;
+                const int lane = (int)c.value / kMaxSteps, st = (int)c.value % kMaxSteps;
+                if (c.b.w <= 0) break;
                 if (st == 0) label(c.b.x - 10, c.b.y + c.b.h / 2 + 1, kLaneNames[lane], 10.5f, Color(80, 50, 110), ALIGN_RIGHT | ALIGN_MIDDLE);
-                const bool off = st >= fULen[u];
-                const char chr = fUL[u][lane][st];
+                const bool off = st >= ue.len;
+                const char chr = ue.lane[lane][st];
                 const float v = off ? 0.f : stepVel(chr);
-                beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, 5);
+                beginPath(); roundedRect(c.b.x, c.b.y, c.b.w, c.b.h, c.b.w > 20 ? 5.f : 3.f);
                 if (off) fillColor(Color(200, 190, 210, 0.3f));
                 else if (v > 0) fillPaint(linearGradient(0, c.b.y, 0, c.b.y + c.b.h, hexc(C.accent, 0.35f + 0.65f * v), mixc(C.accent, 0x8a5cff, 0.5f, 0.35f + 0.65f * v)));
-                else fillColor((st / 4) % 2 ? Color(255, 255, 255, 0.85f) : Color(240, 232, 250, 0.9f));
+                else fillColor((st / ue.beatLen) % 2 ? Color(255, 255, 255, 0.85f) : Color(240, 232, 250, 0.9f));
                 fill();
                 strokeWidth(hv && !off ? 2.f : 1.f); strokeColor(hv && !off ? hexc(0x8a5cff) : Color(180, 160, 210, 0.7f)); stroke();
                 if (chr == 'X' && !off) label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, "!", 12.f, Color(255, 255, 255), ALIGN_CENTER | ALIGN_MIDDLE);
@@ -2683,7 +3581,7 @@ private:
     int fPrevChar = 0;
     bool fInited = false;
 
-    static constexpr int kMaxCtl = 400;
+    static constexpr int kMaxCtl = 700;
     Control fCtl[kMaxCtl];
     int fEraTab = 0, fLastPreset = 0, fEditUser = 0;
     float fLX = 0, fLY = 0, fHairSway = 0, fMouseT = -100, fLastFrameT = 0;
@@ -2704,8 +3602,19 @@ private:
     bool fEditor = false;
     std::string fSmpPath[4];
     int fRoot[4] = {60, 60, 60, 60};
-    char fUL[4][kDrumLanes][17];
+    char fUL[4][kDrumLanes][kMaxSteps + 1];
     int fULen[4] = {16, 16, 16, 16};
+    // v8 overlays and tools
+    bool fToolsOpen = false, fHarmonyOpen = false, fMeterOpen = false;
+    int fXPPage = 0;
+    std::string fSongText, fSongTitle, fStatus;
+    float fStatusT = -100;
+    std::vector<PresetData> fSlots = std::vector<PresetData>(8);
+    uint32_t fLessonMask = 0;
+    enum FileAction { faNone, faSavePreset, faLoadPreset, faExportPack, faImportPack, faMidiTake, faMidiSong };
+    int fFileAction = faNone;
+    uint32_t fSongSeed = 1;
+    int fSongBpm = 120;
     int fCtlCount = 0;
     int fDrag = -1;
     float fDragY = 0, fDragV = 0, fMouseX = -1, fMouseY = -1;
