@@ -408,17 +408,21 @@ static inline GeneratedSong generateSong(uint32_t seed, int forceRecipe = -1) {
     struct GenEv { int t, dur, note, vel, track; };
     std::vector<GenEv> ev;
     auto add = [&](int t, int d, int n, int v, int tr) { if (t >= 0 && t < loop && d > 0 && n > 0 && n < 128) ev.push_back(GenEv{t, d, n, v, tr}); };
+    // a non-vocal melody gets a short breath between notes so retriggers stay clean
     // chord roots: degree of the parent scale around the key, backing octave around C3..B3
     auto chordRoot = [&](int deg, int octBase) { return octBase + G.key + S.parent[deg % 7]; };
     for (int b = 0; b < bars; ++b) {
         const int deg = PR.deg[b % PR.n];
         int root = chordRoot(deg, 48); if (root > 59) root -= 12;
         int ch[5]; const int nc = buildChord(root, G.key, G.scale, C.chordMode, ch);
+        // keep the chord under the melody (top note <= 61) and above the bass (>= 43): parts don't collide
+        for (int i = 0; i < nc; ++i) { while (ch[i] > 61) ch[i] -= 12; while (ch[i] < 43) ch[i] += 12; }
+        for (int i = 0; i < nc; ++i) for (int j = 0; j < i; ++j) if (ch[i] == ch[j]) ch[i] = -1;
         const int t0 = b * barLen;
         if (G.back >= 0) {
-            if (C.backStyle == 0) for (int i = 0; i < nc; ++i) add(t0, barLen, ch[i], 68, 1);
-            else if (C.backStyle == 1) { for (int k = 0; k < 4; ++k) for (int i = 0; i < nc; ++i) add(t0 + k * 4 + 2, 2, ch[i], 72, 1); }
-            else { static const int ord[8] = {0, 2, 1, 2, 0, 2, 1, 2}; for (int k = 0; k < 8; ++k) add(t0 + k * 2, 2, ch[ord[k] % nc] + (k == 4 ? 12 : 0), 64, 1); }
+            if (C.backStyle == 0) for (int i = 0; i < nc; ++i) add(t0, barLen, ch[i], 58, 1);
+            else if (C.backStyle == 1) { for (int k = 0; k < 4; ++k) for (int i = 0; i < nc; ++i) add(t0 + k * 4 + 2, 2, ch[i], 62, 1); }
+            else { static const int ord[8] = {0, 2, 1, 2, 0, 2, 1, 2}; for (int k = 0; k < 8; ++k) add(t0 + k * 2, 2, ch[ord[k] % nc], 56, 1); }
         }
         if (G.bass >= 0) {
             int bn = root - 12; while (bn < 33) bn += 12; while (bn > 47) bn -= 12;
@@ -488,7 +492,7 @@ static inline GeneratedSong generateSong(uint32_t seed, int forceRecipe = -1) {
             }
             target = mel[cur];
             if (section == 0 && (b % 2) == 0) motifPitch.push_back(target);
-            const int gap = G.vocal ? 0 : (C.bpm > 140 ? 1 : 0);
+            const int gap = G.vocal ? 0 : (d >= 3 ? 1 : 0);
             add(t, std::max(1, d - gap), target, strong ? 104 : 92, 0);
             ++lyricsCount;
         }

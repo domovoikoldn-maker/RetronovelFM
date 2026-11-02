@@ -3188,7 +3188,7 @@ private:
             fill(); strokeWidth(1.5f); strokeColor(on || c.type == ctSongGen ? Color(255, 255, 255) : hexc(C.accent, 0.8f)); stroke();
             label(c.b.x + c.b.w / 2, c.b.y + c.b.h / 2 + 1, t, c.type == ctHarmonyOpen ? 10.5f : 11.5f, on || c.type == ctSongGen ? Color(255, 255, 255) : hexc(C.accent), ALIGN_CENTER | ALIGN_MIDDLE);
         }
-        label(944, 28, "v8.0", 10.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
+        label(944, 28, "v8.4", 10.f, Color(150, 120, 160), ALIGN_RIGHT | ALIGN_BASELINE);
     }
 
     // small round arrows in a panel header (instrument / idol browsing)

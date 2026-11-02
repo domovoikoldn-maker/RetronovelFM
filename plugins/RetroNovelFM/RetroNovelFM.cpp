@@ -24,7 +24,7 @@ protected:
     const char* getDescription() const override { return "FM synth + drum machine in the style of PC-98 / 90s visual novels and RPG Maker music"; }
     const char* getMaker() const override { return "RetroNovel"; }
     const char* getLicense() const override { return "ISC"; }
-    uint32_t getVersion() const override { return d_version(8, 0, 0); }
+    uint32_t getVersion() const override { return d_version(8, 4, 0); }
 
     static void setEnum(Parameter& p, const char* const* names, int count)
     {

@@ -113,7 +113,7 @@ static const NeoPatch* neoPatches()
 
 class NeoSynth {
 public:
-    static constexpr int NV = 16;
+    static constexpr int NV = 24;
     static constexpr int KS = 4096;
 
     NeoSynth() : bank(SampleBank::get()) { neoPatches(); ks.assign(NV * KS, 0.f); }
@@ -148,11 +148,13 @@ public:
         start(v, pi, note, vel, f, gainMul);
     }
 
-    void noteOff(int note, bool pedal, double transpose) {
+    void noteOff(int note, bool pedal, double transpose, int inst = -1) {
+        const int onlyPatch = inst >= kFirstNeo ? inst - kFirstNeo : -1;
+        if (inst >= 0 && onlyPatch < 0) return;
         // mono voices: fall back to the previous held note
         popStack(note);
         for (auto& v : voices) {
-            if (!v.active || v.released || v.note != note) continue;
+            if (!v.active || v.released || v.note != note || (onlyPatch >= 0 && v.patch != onlyPatch)) continue;
             if (v.mono && nstack > 0) {
                 const int nn = stack[nstack - 1];
                 v.note = nn; v.target = 440.0 * std::pow(2.0, (nn + transpose - 69) / 12.0);
@@ -275,7 +277,7 @@ private:
                 v.ph[k] += d; if (v.ph[k] >= 1) v.ph[k] -= 1;
                 double o;
                 if (P.osc == noSaw) o = (2 * v.ph[k] - 1) - blep(v.ph[k], d);
-                else { o = v.ph[k] < P.pw ? 1.0 : -1.0; o += blep(v.ph[k], d); double q = v.ph[k] + 1.0 - P.pw; q -= std::floor(q); o -= blep(q, d); }
+                else { o = (v.ph[k] < P.pw ? 1.0 : -1.0) - (2.0 * P.pw - 1.0); o += blep(v.ph[k], d); double q = v.ph[k] + 1.0 - P.pw; q -= std::floor(q); o -= blep(q, d); }
                 if (P.osc2Lvl > 0) {
                     const double d2 = d * std::pow(2.0, P.osc2Semi / 12.0);
                     v.ph2[k] += d2; if (v.ph2[k] >= 1) v.ph2[k] -= 1;
@@ -342,18 +344,18 @@ private:
         case noPluck: {
             float* buf = &ks[(&v - voices) * KS];
             const int N = (int)v.ksLen;
-            // sawari: the bridge buzz shortens the string a little when it swings wide
             const double fracLen = v.ksLen - N;
             const int i0 = v.ksPos, i1 = (i0 + 1) % N;
             const float y = buf[i0] * (float)(1 - fracLen) + buf[i1] * (float)fracLen;
-            float nv = (y + v.ksPrev) * 0.5f * (v.released ? 0.9f : 0.9965f);
-            if (std::fabs(nv) > 0.18f) nv = nv * 0.97f + (nv > 0 ? 0.0045f : -0.0045f);
+            float nv = (y + v.ksPrev) * 0.5f * (v.released ? 0.92f : 0.9968f);
+            // sawari: a soft, smooth bridge buzz (no hard steps -> no hiss)
+            nv -= 0.35f * nv * nv * nv;
             v.ksPrev = y; buf[i0] = nv;
             v.ksPos = (v.ksPos + 1) % N;
-            // body: two resonances of the skin-covered drum body
+            // body resonance of the skin-covered drum body
             v.body[0] += (y - v.body[0]) * 0.18f;
             v.body[1] += (v.body[0] - v.body[1]) * 0.18f;
-            const float o = y * (1.f - P.bodyMix * 0.5f) + (v.body[0] - v.body[1]) * P.bodyMix * 2.2f;
+            const float o = y * (1.f - P.bodyMix * 0.5f) + (v.body[0] - v.body[1]) * P.bodyMix * 1.6f;
             l = r = o * 1.1f;
             break;
         }
@@ -378,8 +380,8 @@ private:
 
     Voice& alloc() {
         for (auto& v : voices) if (!v.active) return v;
-        Voice* best = &voices[0]; uint32_t ba = 0xFFFFFFFFu;
-        for (auto& v : voices) if (v.age < ba) { ba = v.age; best = &v; }
+        Voice* best = &voices[0]; float bl = 1e9f;
+        for (auto& v : voices) { const float l = v.env * v.amp * (v.released ? 0.3f : 1.f); if (l < bl) { bl = l; best = &v; } }
         return *best;
     }
     void start(Voice& v, int pi, int note, int vel, double f, float gainMul) {
@@ -421,11 +423,13 @@ private:
             v.ksLen = std::min((double)KS - 2, srate / f);
             const int N = (int)v.ksLen + 2;
             float hp = 0, prev = 0;
+            float lp = 0;
             for (int i = 0; i < N; ++i) {
-                // hard plectrum (bachi): bright, almost white excitation, plus a sharp click
+                // plectrum (bachi): bright but smoothed excitation
                 const float nz = noise();
-                hp = nz - prev; prev = nz;
-                buf[i] = (nz * 0.55f + hp * 0.45f) * (0.6f + 0.4f * x);
+                lp += (nz - lp) * 0.55f;
+                hp = lp - prev; prev = lp;
+                buf[i] = (lp * 0.75f + hp * 0.2f) * (0.55f + 0.35f * x);
             }
             v.ksPos = 0; v.ksPrev = 0; v.body[0] = v.body[1] = 0;
         }

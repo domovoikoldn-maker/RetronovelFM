@@ -211,7 +211,7 @@ static const XPInst kUserDef = {srcSample, {{nullptr,0,0,0,0},{nullptr,0,0,0,0},
 // ------------------------------------------------------------------ voices
 class Sampler {
 public:
-    static constexpr int NV = 24;
+    static constexpr int NV = 32;
     static constexpr int KS = 8192;   // Karplus-Strong buffer per voice
 
     Sampler() : bank(SampleBank::get()) {
@@ -234,8 +234,13 @@ public:
     void noteOn(int inst, int note, int vel, double transpose, float gainMul = 1.f) {
         Voice* best = nullptr;
         for (auto& v : voices) if (!v.active) { best = &v; break; }
-        if (!best) { uint32_t ba = 0xFFFFFFFFu; for (auto& v : voices) if (v.age < ba) { ba = v.age; best = &v; } }
+        if (!best) {
+            // steal the quietest voice (released tails first) instead of the oldest: no audible cut
+            float bl = 1e9f;
+            for (auto& v : voices) { const float l = v.env * v.amp * (v.released ? 0.3f : 1.f); if (l < bl) { bl = l; best = &v; } }
+        }
         Voice& v = *best;
+        v.inst = inst;
         std::memset(v.play, 0, sizeof(v.play));
         v.np = 0; v.src = srcSample;
         const double x = vel / 127.0;
@@ -350,8 +355,9 @@ public:
         v.vph = 0;
     }
 
-    void noteOff(int note, bool pedal) {
-        for (auto& v : voices) if (v.active && v.note == note && !v.released) { if (pedal) v.held = true; else release(v); }
+    // inst >= 0: only that instrument's voices (song tracks must not cut each other)
+    void noteOff(int note, bool pedal, int inst = -1) {
+        for (auto& v : voices) if (v.active && v.note == note && !v.released && (inst < 0 || v.inst == inst)) { if (pedal) v.held = true; else release(v); }
     }
     void pedalUp() { for (auto& v : voices) if (v.active && v.held) release(v); }
     void allOff() { for (auto& v : voices) if (v.active) release(v); }
@@ -469,7 +475,7 @@ public:
                     v.oph[k] += dt; if (v.oph[k] >= 1) v.oph[k] -= 1;
                     const double p = v.oph[k];
                     if (v.src == srcSquare) {
-                        double sq = p < 0.25 ? 1.0 : -1.0;
+                        double sq = (p < 0.25 ? 1.0 : -1.0) + 0.5;   // 25% pulse without its DC offset
                         sq += blep(p, dt); sq -= blep(std::fmod(p + 0.75, 1.0), dt);
                         o += sq * 0.6;
                     } else o += (2 * p - 1) - blep(p, dt);
@@ -544,7 +550,7 @@ private:
     struct Play { const Zone* z; double pos, inc, revStart; float gain, pan; bool rev; };
     struct Voice {
         bool active = false, released = false, held = false, lpOn = false;
-        int note = 0, stage = 0, np = 0; uint32_t age = 0;
+        int note = 0, stage = 0, np = 0, inst = -1; uint32_t age = 0;
         SrcType src = srcSample;
         const XPInst* def = nullptr;
         Play play[6];

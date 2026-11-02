@@ -210,7 +210,9 @@ public:
         stepsPerSample = (bpm > 0 ? bpm : 120.0) / 60.0 * 4.0 / srate;
         if (mode == 0) { running = false; return; }
         if (playing && posValid) {
-            if (!running || resync || std::fabs(posSteps - pos) > 0.05) { pos = posSteps; resyncNext(); }
+            const double d = posSteps - pos;
+            if (!running || resync || free || std::fabs(d) > 1.0) { pos = posSteps; resyncNext(); }   // start, seek or loop
+            else if (std::fabs(d) > 0.05) pos = posSteps;   // a small wobble: follow it without replaying hits
             running = true; free = false;
         } else if (mode == 2) {
             if (!running || !free) { pos = 0; resyncNext(); free = true; }
@@ -229,11 +231,12 @@ public:
         int guard = 0;
         while (trigTime(next, P) <= pos && guard++ < 8) {
             fire(d, next, P, fills);
-            ++next;
+            ++next; ++fired;
         }
     }
 
     int currentStep() const { return running ? lastStep : -1; }
+    long fired = 0;   // diagnostics: steps played
     bool isRunning() const { return running; }
     bool isFree() const { return free; }
     double position() const { return pos; }
